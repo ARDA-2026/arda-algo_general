@@ -17,7 +17,7 @@ print("=== Han River Real-time Drift Simulation ===")
 # ─────────────────────────────────────────
 # HRFCO API
 # ─────────────────────────────────────────
-API_KEY  = "E93FA1E7-D64F-41CB-8D90-8DACA15EDAAE"
+API_KEY  = ""
 OBS_CODE = "1018683"
 
 def get_velocity():
