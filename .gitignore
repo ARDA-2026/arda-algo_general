@@ -1,3 +1,6 @@
+# macOS
+.DS_Store
+
 # HWP 파일
 *.hwp
 
@@ -6,3 +9,11 @@ cache/
 
 # 가상환경
 .venv/
+
+# 임시 파일
+temp/
+*.tmp
+
+# CodeRunner 임시 파일
+tempCodeRunnerFile.py
+.coderunner/
