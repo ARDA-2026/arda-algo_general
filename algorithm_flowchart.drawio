@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net">
+  <diagram name="한강 표류 추적 알고리즘" id="algorithm">
+    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- 입력 -->
+        <mxCell id="input" value="입수 좌표 + 시각" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="430" y="30" width="200" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- ======================== -->
+        <!-- 섹션 1: OpenDrift/Leeway -->
+        <!-- ======================== -->
+        <mxCell id="sec1" value="1. OpenDrift / Leeway" style="swimlane;startSize=30;fillColor=#f3e8ff;strokeColor=#9c5fb5;fontStyle=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="200" y="120" width="660" height="240" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s1_1" value="파티클 초기화&#xa;입수 좌표 중심, N=500, 반경 10m" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="sec1">
+          <mxGeometry x="180" y="50" width="300" height="55" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s1_2" value="유속 벡터 적용 (dynamics_fn)&#xa;Runge-Kutta 4차 + 확산계수" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="sec1">
+          <mxGeometry x="180" y="130" width="300" height="55" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s1_3" value="파티클 전파 (t → t+Δt)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="sec1">
+          <mxGeometry x="180" y="190" width="300" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- 섹션1 내부 화살표 -->
+        <mxCell id="e_s1_12" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="s1_1" target="s1_2" parent="sec1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_s1_23" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="s1_2" target="s1_3" parent="sec1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ======================== -->
+        <!-- 섹션 2: 파티클 필터 -->
+        <!-- ======================== -->
+        <mxCell id="sec2" value="2. 파티클 필터" style="swimlane;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="200" y="400" width="660" height="290" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s2_sensor" value="센서 관측값&#xa;열화상 / 광학 카메라" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="sec2">
+          <mxGeometry x="20" y="50" width="150" height="55" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s2_1" value="예측 단계 (Prediction)&#xa;OpenDrift 출력 → 파티클 위치 갱신" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="sec2">
+          <mxGeometry x="200" y="50" width="300" height="55" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s2_no_sensor" value="센서 미감지&#xa;가중치 유지" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="sec2">
+          <mxGeometry x="520" y="130" width="130" height="55" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s2_2" value="관측 단계 (Update)&#xa;파티클 ↔ 관측값 거리 → 가중치 계산" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="sec2">
+          <mxGeometry x="200" y="130" width="300" height="55" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s2_3" value="가중치 정규화 + 리샘플링" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="sec2">
+          <mxGeometry x="200" y="215" width="300" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- 섹션2 내부 화살표 -->
+        <mxCell id="e_sensor_s21" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="s2_sensor" target="s2_1" parent="sec2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_s21_s22" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="s2_1" target="s2_2" parent="sec2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_s21_no" style="edgeStyle=orthogonalEdgeStyle;dashed=1;" edge="1" source="s2_1" target="s2_no_sensor" parent="sec2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_s22_s23" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="s2_2" target="s2_3" parent="sec2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ======================== -->
+        <!-- 섹션 3: 히트맵 -->
+        <!-- ======================== -->
+        <mxCell id="sec3" value="3. 히트맵 생성" style="swimlane;startSize=30;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="200" y="730" width="660" height="230" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s3_1" value="격자 분할 (Grid)&#xa;한강 OSM 폴리곤 기반 격자화" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontStyle=1;" vertex="1" parent="sec3">
+          <mxGeometry x="180" y="45" width="300" height="55" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s3_2" value="격자별 확률 계산&#xa;파티클 밀도 → 확률값 정규화 (0~100%)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontStyle=1;" vertex="1" parent="sec3">
+          <mxGeometry x="180" y="120" width="300" height="55" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s3_3" value="확률 히트맵 출력" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontStyle=1;" vertex="1" parent="sec3">
+          <mxGeometry x="180" y="180" width="300" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- 섹션3 내부 화살표 -->
+        <mxCell id="e_s3_12" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="s3_1" target="s3_2" parent="sec3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_s3_23" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="s3_2" target="s3_3" parent="sec3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ======================== -->
+        <!-- 섹션 4: 드론 Waypoint -->
+        <!-- ======================== -->
+        <mxCell id="sec4" value="4. 드론 Waypoint 생성" style="swimlane;startSize=30;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="200" y="1000" width="660" height="230" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s4_1" value="구역 확률 내림차순 정렬&#xa;임계값 (0.5%) 이상 구역 필터링" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="sec4">
+          <mxGeometry x="180" y="45" width="300" height="55" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s4_2" value="수색 경로 최적화&#xa;확률 순서 + 이동 거리 최소화" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="sec4">
+          <mxGeometry x="180" y="120" width="300" height="55" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s4_3" value="Waypoint 리스트 → 드론 전달" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="sec4">
+          <mxGeometry x="180" y="185" width="300" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- 섹션4 내부 화살표 -->
+        <mxCell id="e_s4_12" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="s4_1" target="s4_2" parent="sec4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_s4_23" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="s4_2" target="s4_3" parent="sec4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- 출력 -->
+        <mxCell id="output" value="드론 수색 실행" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="430" y="1270" width="200" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- ======================== -->
+        <!-- 섹션 간 화살표 -->
+        <!-- ======================== -->
+        <mxCell id="e_input_sec1" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="input" target="s1_1" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_sec1_sec2" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="s1_3" target="s2_1" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_sec2_sec3" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="s2_3" target="s3_1" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_sec3_sec4" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="s3_3" target="s4_1" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_sec4_output" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="s4_3" target="output" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- 30초 반복 루프 -->
+        <mxCell id="loop_label" value="30초 반복" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=2;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="100" y="580" width="80" height="30" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="loop_arrow" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#999999;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" source="s3_3" target="s2_1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="140" y="950"/>
+              <mxPoint x="140" y="477"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- 드론 피드백 루프 -->
+        <mxCell id="feedback_label" value="위치 피드백" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=2;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="900" y="700" width="90" height="30" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="feedback_arrow" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#999999;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" source="s4_3" target="s2_1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="920" y="1210"/>
+              <mxPoint x="920" y="477"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
