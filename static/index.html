@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>Han River Drift Simulation</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #e0e0e0; font-family: 'Segoe UI', monospace; display: flex; height: 100vh; overflow: hidden; }
+
+#canvas-wrap { flex: 1; position: relative; }
+canvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
+
+/* 캔버스 위 오버레이 툴바 */
+#toolbar {
+  position: absolute; top: 10px; left: 10px;
+  display: flex; gap: 6px;
+}
+.tbtn {
+  background: rgba(20,20,40,0.85); border: 1px solid #444;
+  color: #cde; padding: 5px 10px; border-radius: 6px; font-size: 12px;
+  cursor: pointer; user-select: none; white-space: nowrap;
+}
+.tbtn:hover { background: rgba(50,50,80,0.95); border-color: #7df; }
+.tbtn.active { background: rgba(0,100,180,0.7); border-color: #7df; color: #fff; }
+
+/* 커서 좌표 표시 */
+#coords {
+  position: absolute; bottom: 10px; left: 10px;
+  background: rgba(0,0,0,0.6); color: #aaa;
+  padding: 3px 9px; border-radius: 8px; font-size: 11px; pointer-events: none;
+}
+#hint {
+  position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+  background: rgba(0,0,0,0.55); color: #aef;
+  padding: 3px 12px; border-radius: 10px; font-size: 11px; pointer-events: none;
+}
+
+/* 우측 패널 */
+#panel { width: 280px; background: #0f0f1a; border-left: 1px solid #333; padding: 16px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+.card { background: #1e1e30; border-radius: 8px; padding: 12px; }
+.card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #888; margin-bottom: 8px; }
+.stat { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px; }
+.stat .val { font-weight: bold; color: #7df; }
+.wp { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; }
+.wp-dot { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; }
+.wp-info { flex: 1; }
+.wp-prob { font-weight: bold; }
+#obs-list { font-size: 11px; color: #aaa; }
+.obs-item { margin-bottom: 2px; }
+h2 { font-size: 14px; color: #7df; text-align: center; padding-bottom: 8px; border-bottom: 1px solid #333; }
+.connected { color: #4f4; font-size: 11px; text-align: center; }
+.disconnected { color: #f44; font-size: 11px; text-align: center; }
+</style>
+</head>
+<body>
+
+<div id="canvas-wrap">
+  <canvas id="c"></canvas>
+
+  <div id="toolbar">
+    <div class="tbtn" id="btn-reset"   onclick="resetView()"  title="R">🏠 초기화</div>
+    <div class="tbtn" id="btn-follow"  onclick="toggleFollow()" title="F">📍 따라가기</div>
+    <div class="tbtn" id="btn-zoom-in" onclick="zoomAt(0.5)"  title="+">＋</div>
+    <div class="tbtn" id="btn-zoom-out"onclick="zoomAt(-0.5)" title="-">－</div>
+  </div>
+
+  <div id="coords">lat — lon —</div>
+  <div id="hint">드래그: 이동 &nbsp;|&nbsp; 스크롤: 줌 &nbsp;|&nbsp; 클릭: 관측값 입력</div>
+</div>
+
+<div id="panel">
+  <h2>Han River Drift</h2>
+  <div id="conn" class="disconnected">● 연결 중...</div>
+
+  <div class="card">
+    <h3>시뮬레이션 상태</h3>
+    <div class="stat"><span>경과 시간</span><span class="val" id="s-time">-</span></div>
+    <div class="stat"><span>유속</span><span class="val" id="s-vel">-</span></div>
+    <div class="stat"><span>강 내 파티클</span><span class="val" id="s-inriver">-</span></div>
+    <div class="stat"><span>육지 도달</span><span class="val" id="s-stranded">-</span></div>
+  </div>
+
+  <div class="card">
+    <h3>최고 확률 예측 위치</h3>
+    <div class="stat"><span>위도</span><span class="val" id="s-blat">-</span></div>
+    <div class="stat"><span>경도</span><span class="val" id="s-blon">-</span></div>
+  </div>
+
+  <div class="card" id="waypoints">
+    <h3>수색 우선순위 TOP 3</h3>
+    <div id="wp-list"></div>
+  </div>
+
+  <div class="card">
+    <h3>범례</h3>
+    <div class="stat"><span>🔴 입수 지점</span></div>
+    <div class="stat"><span>🟠 파티클</span></div>
+    <div class="stat"><span>🟣 육지 도달</span></div>
+    <div class="stat"><span>🩵 최고 확률 지점</span></div>
+    <div class="stat"><span>🟢 관측값 (클릭)</span></div>
+  </div>
+
+  <div class="card">
+    <h3>관측값 기록</h3>
+    <div id="obs-list">없음</div>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+
+// 초기 지도 범위 (hanriver.py 와 동일)
+const INIT = { lonMin: 126.900, lonMax: 126.918, latMin: 37.537, latMax: 37.546 };
+
+// ── 동적 뷰포트 ──
+let view = { ...INIT };
+
+let W, H;
+let riverGeojson = null;
+let state = null;
+let autoFollow = false;
+
+// ── 좌표 변환 (view 기준) ──
+function toCanvas(lon, lat) {
+  return [
+    (lon - view.lonMin) / (view.lonMax - view.lonMin) * W,
+    H - (lat - view.latMin) / (view.latMax - view.latMin) * H,
+  ];
+}
+function fromCanvas(px, py) {
+  return {
+    lon: view.lonMin + px / W * (view.lonMax - view.lonMin),
+    lat: view.latMin + (1 - py / H) * (view.latMax - view.latMin),
+  };
+}
+
+// ── 뷰 컨트롤 ──
+function resetView() {
+  view = { ...INIT };
+  autoFollow = false;
+  document.getElementById('btn-follow').classList.remove('active');
+  render();
+}
+
+function toggleFollow() {
+  autoFollow = !autoFollow;
+  document.getElementById('btn-follow').classList.toggle('active', autoFollow);
+}
+
+// deltaZ: 양수=줌인, 음수=줌아웃 (중심 기준)
+function zoomAt(deltaZ, cx, cy) {
+  const factor = Math.pow(2, -deltaZ * 0.8);
+  const pivotLon = cx !== undefined ? fromCanvas(cx, cy).lon : (view.lonMin + view.lonMax) / 2;
+  const pivotLat = cx !== undefined ? fromCanvas(cx, cy).lat : (view.latMin + view.latMax) / 2;
+  view.lonMin = pivotLon + (view.lonMin - pivotLon) * factor;
+  view.lonMax = pivotLon + (view.lonMax - pivotLon) * factor;
+  view.latMin = pivotLat + (view.latMin - pivotLat) * factor;
+  view.latMax = pivotLat + (view.latMax - pivotLat) * factor;
+  render();
+}
+
+// ── 드래그 패닝 ──
+const drag = { on: false, x0: 0, y0: 0, lon0: 0, lonSpan: 0, lat0: 0, latSpan: 0, moved: false };
+
+canvas.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  drag.on      = true;
+  drag.moved   = false;
+  drag.x0      = e.clientX;
+  drag.y0      = e.clientY;
+  const rect   = canvas.getBoundingClientRect();
+  drag.lonSpan = view.lonMax - view.lonMin;
+  drag.latSpan = view.latMax - view.latMin;
+  drag.lon0    = view.lonMin;
+  drag.lat0    = view.latMin;
+  canvas.style.cursor = 'grabbing';
+});
+
+window.addEventListener('mousemove', (e) => {
+  // 커서 좌표 표시
+  const rect  = canvas.getBoundingClientRect();
+  const px    = (e.clientX - rect.left) * (W / rect.width);
+  const py    = (e.clientY - rect.top)  * (H / rect.height);
+  const { lon, lat } = fromCanvas(px, py);
+  document.getElementById('coords').textContent =
+    `lat ${lat.toFixed(5)}  lon ${lon.toFixed(5)}`;
+
+  if (!drag.on) return;
+
+  const dx  = (e.clientX - drag.x0) * (W / rect.width);
+  const dy  = (e.clientY - drag.y0) * (H / rect.height);
+  const dLon = -dx / W * drag.lonSpan;
+  const dLat =  dy / H * drag.latSpan;
+
+  if (Math.abs(e.clientX - drag.x0) > 4 || Math.abs(e.clientY - drag.y0) > 4) {
+    drag.moved = true;
+    if (autoFollow) { autoFollow = false; document.getElementById('btn-follow').classList.remove('active'); }
+  }
+
+  view.lonMin = drag.lon0 + dLon;
+  view.lonMax = drag.lon0 + dLon + drag.lonSpan;
+  view.latMin = drag.lat0 + dLat;
+  view.latMax = drag.lat0 + dLat + drag.latSpan;
+  render();
+});
+
+window.addEventListener('mouseup', (e) => {
+  if (!drag.on) return;
+  drag.on = false;
+  canvas.style.cursor = 'crosshair';
+
+  // 드래그 없이 클릭 → 관측값 전송
+  if (!drag.moved && e.button === 0) {
+    const rect = canvas.getBoundingClientRect();
+    const px   = (e.clientX - rect.left) * (W / rect.width);
+    const py   = (e.clientY - rect.top)  * (H / rect.height);
+    const { lon, lat } = fromCanvas(px, py);
+    fetch('/observation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lon, lat }),
+    });
+  }
+});
+
+// ── 스크롤 줌 (마우스 위치 기준) ──
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const cx   = (e.clientX - rect.left) * (W / rect.width);
+  const cy   = (e.clientY - rect.top)  * (H / rect.height);
+  zoomAt(e.deltaY > 0 ? -0.3 : 0.3, cx, cy);
+  if (autoFollow) { autoFollow = false; document.getElementById('btn-follow').classList.remove('active'); }
+}, { passive: false });
+
+// ── 키보드 단축키 ──
+window.addEventListener('keydown', (e) => {
+  const PAN = (view.lonMax - view.lonMin) * 0.15;
+  const PANL = (view.latMax - view.latMin) * 0.15;
+  if      (e.key === 'ArrowLeft')  { view.lonMin -= PAN;  view.lonMax -= PAN;  render(); }
+  else if (e.key === 'ArrowRight') { view.lonMin += PAN;  view.lonMax += PAN;  render(); }
+  else if (e.key === 'ArrowUp')    { view.latMin += PANL; view.latMax += PANL; render(); }
+  else if (e.key === 'ArrowDown')  { view.latMin -= PANL; view.latMax -= PANL; render(); }
+  else if (e.key === '+' || e.key === '=') zoomAt(0.5);
+  else if (e.key === '-')               zoomAt(-0.5);
+  else if (e.key === 'r' || e.key === 'R') resetView();
+  else if (e.key === 'f' || e.key === 'F') toggleFollow();
+});
+
+// ── hot_r 컬러맵 ──
+function hotR(val, vmin = 0.01, vmax = 10) {
+  if (val < vmin) return null;
+  const t = Math.min(1, (val - vmin) / (vmax - vmin));
+  let r, g, b;
+  if (t < 1/3)      { r=255; g=255; b=Math.round(255*(1-t*3)); }
+  else if (t < 2/3) { r=255; g=Math.round(255*(1-(t-1/3)*3)); b=0; }
+  else               { r=Math.round(255*(1-(t-2/3)*3)); g=0; b=0; }
+  return `rgba(${r},${g},${b},0.55)`;
+}
+
+// ── 동적 격자 ──
+function niceStep(span) {
+  const raw = span / 5;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  return [1, 2, 5, 10].find(m => m * mag >= raw) * mag;
+}
+function drawGrid() {
+  ctx.strokeStyle  = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth    = 0.5;
+  ctx.font         = '9px monospace';
+  ctx.fillStyle    = 'rgba(255,255,255,0.3)';
+  ctx.textAlign    = 'left';
+  ctx.textBaseline = 'top';
+
+  const lonStep = niceStep(view.lonMax - view.lonMin);
+  const latStep = niceStep(view.latMax - view.latMin);
+  const dec = Math.max(0, -Math.floor(Math.log10(lonStep)) + 1);
+
+  for (let lon = Math.ceil(view.lonMin / lonStep) * lonStep; lon <= view.lonMax + lonStep * 0.01; lon += lonStep) {
+    const [x] = toCanvas(lon, view.latMin);
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    ctx.fillText(lon.toFixed(dec), x + 2, 2);
+  }
+  for (let lat = Math.ceil(view.latMin / latStep) * latStep; lat <= view.latMax + latStep * 0.01; lat += latStep) {
+    const [, y] = toCanvas(view.lonMin, lat);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    ctx.fillText(lat.toFixed(dec), 2, y + 2);
+  }
+}
+
+// ── 강 폴리곤 ──
+function drawRiver() {
+  if (!riverGeojson) return;
+  ctx.fillStyle   = 'rgba(70,130,180,0.25)';
+  ctx.strokeStyle = 'rgba(100,160,210,0.5)';
+  ctx.lineWidth   = 0.8;
+  for (const feat of riverGeojson.features) {
+    const g = feat.geometry;
+    if (!g) continue;
+    const polys = g.type === 'Polygon'      ? [g.coordinates]
+                : g.type === 'MultiPolygon' ? g.coordinates : [];
+    for (const poly of polys) {
+      for (const ring of poly) {
+        ctx.beginPath();
+        for (let i = 0; i < ring.length; i++) {
+          const [x, y] = toCanvas(ring[i][0], ring[i][1]);
+          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+      }
+    }
+  }
+}
+
+// ── 히트맵 ──
+function drawHeatmap(hm, ext) {
+  if (!hm || hm.length === 0) return;
+  const rows = hm.length, cols = hm[0].length;
+  const [lonMinH, lonMaxH, latMinH, latMaxH] = ext;
+  const dLon = (lonMaxH - lonMinH) / cols;
+  const dLat = (latMaxH - latMinH) / rows;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const color = hotR(hm[r][c]);
+      if (!color) continue;
+      const [x1, y1] = toCanvas(lonMinH + c * dLon,       latMinH + (r+1) * dLat);
+      const [x2, y2] = toCanvas(lonMinH + (c+1) * dLon,   latMinH + r * dLat);
+      ctx.fillStyle = color;
+      ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
+    }
+  }
+}
+
+// ── 파티클 ──
+function drawParticles(lons, lats) {
+  ctx.fillStyle = 'rgba(255,160,50,0.55)';
+  for (let i = 0; i < lons.length; i++) {
+    const [x, y] = toCanvas(lons[i], lats[i]);
+    ctx.beginPath(); ctx.arc(x, y, 2.2, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+// ── 육지 도달 X ──
+function drawStranded(lons, lats) {
+  ctx.strokeStyle = 'rgba(180,80,220,0.8)';
+  ctx.lineWidth   = 1.2;
+  for (let i = 0; i < lons.length; i++) {
+    const [x, y] = toCanvas(lons[i], lats[i]);
+    const s = 4;
+    ctx.beginPath();
+    ctx.moveTo(x-s, y-s); ctx.lineTo(x+s, y+s);
+    ctx.moveTo(x+s, y-s); ctx.lineTo(x-s, y+s);
+    ctx.stroke();
+  }
+}
+
+// ── 궤적 ──
+function drawTrail(lons, lats) {
+  if (lons.length < 2) return;
+  ctx.strokeStyle = 'rgba(0,220,220,0.5)';
+  ctx.lineWidth   = 1.5;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  for (let i = 0; i < lons.length; i++) {
+    const [x, y] = toCanvas(lons[i], lats[i]);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawDiamond(x, y, size, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(x, y-size); ctx.lineTo(x+size, y); ctx.lineTo(x, y+size); ctx.lineTo(x-size, y);
+  ctx.closePath(); ctx.fill();
+}
+
+function drawStar(x, y, r, color) {
+  ctx.fillStyle = color; ctx.strokeStyle = '#fff'; ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = i * Math.PI / 5 - Math.PI / 2;
+    const d = i % 2 === 0 ? r : r * 0.4;
+    const px = x + Math.cos(a)*d, py = y + Math.sin(a)*d;
+    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+  }
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+}
+
+function drawTriangle(x, y, size, color) {
+  ctx.fillStyle = color; ctx.strokeStyle = '#fff'; ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(x, y-size); ctx.lineTo(x+size, y+size*0.7); ctx.lineTo(x-size, y+size*0.7);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+}
+
+const WP_COLORS = ['#00ff44', '#ffff00', '#ff8800'];
+function drawWaypoints(wps) {
+  wps.slice(0,3).forEach((wp, i) => {
+    const [x, y] = toCanvas(wp.lon, wp.lat);
+    ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI*2);
+    ctx.fillStyle   = WP_COLORS[i] + '55';
+    ctx.strokeStyle = WP_COLORS[i];
+    ctx.lineWidth   = 2;
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 9px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(i+1, x, y);
+  });
+}
+
+// ── 메인 렌더 ──
+function render() {
+  if (!state) return;
+  const s = state;
+
+  // 팔로우 모드: 뷰를 best point 중심으로 이동
+  if (autoFollow && s.best_lon != null) {
+    const lonSpan = view.lonMax - view.lonMin;
+    const latSpan = view.latMax - view.latMin;
+    view.lonMin = s.best_lon - lonSpan / 2;
+    view.lonMax = s.best_lon + lonSpan / 2;
+    view.latMin = s.best_lat - latSpan / 2;
+    view.latMax = s.best_lat + latSpan / 2;
+  }
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#0d1117';
+  ctx.fillRect(0, 0, W, H);
+
+  drawGrid();
+  drawRiver();
+  drawHeatmap(s.heatmap, s.heatmap_extent);
+  drawStranded(s.stranded_lons, s.stranded_lats);
+  drawTrail(s.best_trail_lons, s.best_trail_lats);
+  drawParticles(s.particles_lon, s.particles_lat);
+
+  if (s.obs_history) {
+    s.obs_history.slice(0,-1).forEach(([lon, lat]) => {
+      const [x, y] = toCanvas(lon, lat);
+      drawTriangle(x, y, 6, 'rgba(0,255,100,0.35)');
+    });
+  }
+  if (s.observation) {
+    const [x, y] = toCanvas(s.observation[0], s.observation[1]);
+    drawTriangle(x, y, 8, '#00ff66');
+    ctx.strokeStyle = '#00ff66'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(x, y, 14, 0, Math.PI*2); ctx.stroke();
+  }
+
+  const [bx, by] = toCanvas(s.best_lon, s.best_lat);
+  drawDiamond(bx, by, 7, '#00e5ff');
+
+  const [ex, ey] = toCanvas(s.entry_lon, s.entry_lat);
+  drawStar(ex, ey, 10, '#ff3333');
+
+  drawWaypoints(s.waypoints || []);
+
+  // 패널
+  const mins = Math.floor(s.elapsed_sec / 60);
+  const secs = Math.floor(s.elapsed_sec % 60);
+  document.getElementById('s-time').textContent     = `T + ${mins}분 ${String(secs).padStart(2,'0')}초`;
+  document.getElementById('s-vel').textContent      = `${Math.abs(s.velocity_x).toFixed(4)} m/s (서쪽)`;
+  document.getElementById('s-inriver').textContent  = `${s.in_river_count} / 200`;
+  document.getElementById('s-stranded').textContent = `${s.stranded_lons.length} 개`;
+  document.getElementById('s-blat').textContent     = s.best_lat.toFixed(6);
+  document.getElementById('s-blon').textContent     = s.best_lon.toFixed(6);
+
+  document.getElementById('wp-list').innerHTML =
+    (s.waypoints || []).slice(0,3).map((wp, i) => `
+      <div class="wp">
+        <div class="wp-dot" style="background:${WP_COLORS[i]}"></div>
+        <div class="wp-info">
+          <div>${wp.lat.toFixed(5)}, ${wp.lon.toFixed(5)}</div>
+          <div class="wp-prob" style="color:${WP_COLORS[i]}">${wp.prob.toFixed(1)}%</div>
+        </div>
+      </div>`).join('') || '<div style="color:#666;font-size:12px">계산 중...</div>';
+
+  if (s.obs_history && s.obs_history.length > 0) {
+    document.getElementById('obs-list').innerHTML =
+      s.obs_history.slice().reverse().slice(0,5)
+        .map(([lon, lat]) => `<div class="obs-item">📍 ${lat.toFixed(5)}, ${lon.toFixed(5)}</div>`)
+        .join('');
+  }
+}
+
+// ── 리사이즈 ──
+function resize() {
+  const wrap = document.getElementById('canvas-wrap');
+  W = canvas.width  = wrap.clientWidth;
+  H = canvas.height = wrap.clientHeight;
+  render();
+}
+window.addEventListener('resize', resize);
+
+// ── GeoJSON ──
+fetch('/river-geojson').then(r => r.json()).then(g => { riverGeojson = g; render(); });
+
+// ── WebSocket ──
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  const el  = document.getElementById('conn');
+  ws.onopen    = () => { el.textContent = '● 연결됨'; el.className = 'connected'; };
+  ws.onclose   = () => { el.textContent = '● 연결 끊김 — 재연결 중...'; el.className = 'disconnected'; setTimeout(connect, 2000); };
+  ws.onerror   = () => ws.close();
+  ws.onmessage = (e) => { state = JSON.parse(e.data); render(); };
+}
+
+resize();
+connect();
+</script>
+</body>
+</html>

@@ -17,3 +17,6 @@ temp/
 # CodeRunner 임시 파일
 tempCodeRunnerFile.py
 .coderunner/
+
+# API 키 (절대 커밋 금지)
+.env
