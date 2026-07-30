@@ -5,6 +5,17 @@
 
 ---
 
+# 1. 프로젝트 폴더로 이동
+cd c:\Users\kmmjj\SS\arda-algo_general
+
+# 2. 가상환경 활성화
+.\.venv\Scripts\actuvate
+
+# 3. 실행 (프롬프트 앞에 (.venv) 표시되면 성공)
+python hanriver.py
+
+
+
 ## 프로젝트 개요
 
 익수자 발생 시 **실시간 표류 위치를 예측**하여 수색·구조 효율을 높이는 시스템입니다.
@@ -51,7 +62,17 @@
 | 한강 폴리곤 마스킹 | OSM 데이터 기반 한강 본류 폴리곤 추출 (Shapely) |
 | 육지 도달 감지 | 파티클이 한강 밖으로 나가는 순간 위치 기록 |
 | 누적 히트맵 | 표류 확률 분포를 시간 누적으로 안정적으로 시각화 |
+
+'현재 강물 위에 있는 파티클(lons_v, lats_v)의 중심 위치를 기준으로 가로 15칸, 세로 15칸의 격자를 만듭니다.
+
+각 격자 칸에 들어있는 파티클 수의 누적 비율(%)을 계산하여 hist_prob 배열에 저장'
+
+
 | 수색 우선순위 TOP3 | 확률 높은 구역 순서대로 Waypoint 생성 |
+
+
+'튜플 형태인 (경도, 위도, 확률) 로 waypoints 리스트에 담습니다'
+
 | 마우스 클릭 관측값 입력 | 클릭 위치를 관측값으로 파티클 필터 업데이트 |
 | 베스트 포인트 궤적 | 가장 확률 높은 지점의 이동 경로 시각화 |
 | 육지 도달 포인트 마커 | 익수자가 표류 후 쓰러져 있을 수 있는 육지 지점 표시 |
@@ -83,6 +104,7 @@
 pip install opendrift pfilter osmnx shapely geopandas pyqt5 requests
 ```
 
+
 ---
 
 ## 실행 방법
@@ -97,7 +119,7 @@ python hanriver.py
 
 ```python
 # HRFCO API 인증키 (https://www.hrfco.go.kr 에서 발급)
-API_KEY = "YOUR_API_KEY_HERE"
+API_KEY = "8A184989-4DF2-4DA9-B576-DCC468745418"
 
 # 테스트용 유속 (실제 API 사용 시 get_velocity()로 교체)
 velocity_x = -1.5   # m/s, 서쪽 방향
