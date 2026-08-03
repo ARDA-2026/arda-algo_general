@@ -49,7 +49,17 @@ def get_velocity():
         log(f"[API 오류] {e} → 기본값 사용")
         return -0.05, 0.0
 
-velocity_x, velocity_y = get_velocity()
+# ── 유속 설정 ──────────────────────────────
+# 기본값: 고정 유속 (API 키 없이 바로 실행 가능)
+velocity_x = -1.5   # m/s, 서쪽 방향 (한강 평균)
+velocity_y =  0.05  # m/s, 남쪽 방향 (거의 0)
+
+# HRFCO API 실시간 유속으로 전환하려면:
+#   1. .env 파일에 API_KEY 입력
+#   2. 위 두 줄을 주석 처리하고 아래 줄 주석 해제
+# velocity_x, velocity_y = get_velocity()
+# ────────────────────────────────────────────
+
 log(f"[INIT] velocity_x={velocity_x:.4f} m/s")
 
 # ─────────────────────────────────────────

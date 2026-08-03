@@ -154,12 +154,9 @@ http://localhost:8000
 
 ## 실행 전 설정
 
-`hanriver.py` 상단에서 다음 값을 설정하세요:
+`hanriver.py` 에서 다음 값을 필요에 따라 변경하세요:
 
 ```python
-# HRFCO API 인증키 (https://www.hrfco.go.kr 에서 발급)
-API_KEY = "YOUR_API_KEY_HERE"
-
 # 난류 강도 (0.0 ~ 1.0)
 TURBULENCE = 0.3
 
@@ -173,18 +170,44 @@ MAPO_LAT = 37.540
 MAPO_LON = 126.907
 ```
 
-### 실시간 API 유속으로 전환
+---
 
-기본값은 API 자동 호출입니다. API 오류 시 기본값(`-0.05 m/s`)으로 대체됩니다.
+### 유속 모드 전환
+
+#### 기본값 — 고정 유속 (git clone 직후 바로 실행 가능)
+
+API 키 없이도 즉시 실행됩니다.
 
 ```python
-# API 자동 호출 (현재 기본값)
-velocity_x, velocity_y = get_velocity()
+# hanriver.py 의 유속 설정 부분 (기본 상태)
+velocity_x = -1.5   # m/s, 서쪽 방향 (한강 평균)
+velocity_y =  0.05  # m/s, 남쪽 방향
 
-# 또는 고정값으로 테스트
-# velocity_x = -1.5   # m/s, 서쪽 방향
-# velocity_y =  0.05
+# velocity_x, velocity_y = get_velocity()  ← 주석 처리된 상태
 ```
+
+#### API 모드 — HRFCO 실시간 유속
+
+**Step 1.** 한강홍수통제소에서 API 키 발급  
+→ [https://www.hrfco.go.kr/web/openapiPage/openApi.do](https://www.hrfco.go.kr/web/openapiPage/openApi.do)
+
+**Step 2.** `.env` 파일에 키 입력
+
+```bash
+# .env
+API_KEY=발급받은키를여기에입력
+```
+
+**Step 3.** `hanriver.py` 유속 설정 부분을 아래처럼 변경
+
+```python
+# velocity_x = -1.5   ← 이 두 줄을 주석 처리
+# velocity_y =  0.05
+
+velocity_x, velocity_y = get_velocity()  # ← 이 줄 주석 해제
+```
+
+> API 호출 실패 시 자동으로 기본값(`-0.05 m/s`)으로 대체되어 시뮬레이션은 계속 실행됩니다.
 
 ---
 
