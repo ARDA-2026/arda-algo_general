@@ -6,6 +6,8 @@
 
 # 캐시 디렉토리
 cache/
+__pycache__/
+*.pyc
 
 # 가상환경
 .venv/

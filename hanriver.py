@@ -13,7 +13,7 @@ load_dotenv()
 
 VERBOSE = True          # False 로 바꾸면 모든 콘솔 출력 중단
 def log(*args):
-    if VERBOSE: log(*args)
+    if VERBOSE: print(*args)
 
 from shapely.ops import unary_union
 from shapely import contains_xy
@@ -23,6 +23,8 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
+
+import drone_api
 
 log("=== Han River Real-time Drift Simulation (FastAPI) ===")
 
@@ -102,7 +104,10 @@ particle_vx = velocity_x + np.random.normal(0, abs(velocity_x) * TURBULENCE, N)
 particle_vy = velocity_y + np.random.normal(0, abs(velocity_x) * TURBULENCE, N)
 
 DT    = 0.1
-SPEED = 60
+# SPEED = 1프레임당 시뮬레이션 스텝 수.
+# 드론 실기 연동에는 1 (약 1.5배속) 을 쓴다. 60이면 약 90배속이라
+# 드론이 이륙하기도 전에 파티클이 지도를 벗어난다.
+SPEED = 1
 pvlon = particle_vx / 88000
 pvlat = particle_vy / 111000
 DIFFUSIVITY = 2.0 / 88000 * np.sqrt(2 * DT)
@@ -111,7 +116,45 @@ elapsed_sec = 0.0
 PRINT_INTERVAL    = 180
 last_printed_time = -PRINT_INTERVAL
 
-accumulated_hist = np.zeros((15, 15))
+# ─────────────────────────────────────────
+# [3-1] 실물 축소 지도 영역 (3m × 2m, 축척 1:150)
+# ─────────────────────────────────────────
+M_PER_DEG_LON = 88000    # 위도 37.5° 기준
+M_PER_DEG_LAT = 111000
+
+MAP_SCALE    = 150            # 1:150
+MAP_W_M      = 3.0 * MAP_SCALE  # 450 m (동서, 지도 긴 변)
+MAP_H_M      = 2.0 * MAP_SCALE  # 300 m (남북, 지도 짧은 변)
+MAP_EAST_M   = 50.0           # 입수 지점에서 동쪽 여유 (나머지는 서쪽 표류 구간)
+
+map_lon_max = MAPO_LON + MAP_EAST_M / M_PER_DEG_LON
+map_lon_min = map_lon_max - MAP_W_M / M_PER_DEG_LON
+map_lat_max = MAPO_LAT + (MAP_H_M / 2) / M_PER_DEG_LAT
+map_lat_min = MAPO_LAT - (MAP_H_M / 2) / M_PER_DEG_LAT
+
+# 누적 격자는 지도 영역에 "고정" 한다.
+# (매 프레임 파티클 무게중심으로 재중심을 잡으면 서로 다른 좌표계의
+#  카운트를 더하게 되어 누적 확률이 뭉개진다.)
+GRID_NX = 30    # 450m / 30 = 15 m/칸
+GRID_NY = 20    # 300m / 20 = 15 m/칸
+GRID_XEDGES = np.linspace(map_lon_min, map_lon_max, GRID_NX + 1)
+GRID_YEDGES = np.linspace(map_lat_min, map_lat_max, GRID_NY + 1)
+GRID_XCENT  = (GRID_XEDGES[:-1] + GRID_XEDGES[1:]) / 2
+GRID_YCENT  = (GRID_YEDGES[:-1] + GRID_YEDGES[1:]) / 2
+
+# 수색 우선순위 waypoint 를 서로 떨어뜨리는 최소 간격.
+# 확률 상위 N개를 그냥 뽑으면 인접 칸이 나와 드론이 제자리에서 도는 것처럼 보인다.
+NMS_MIN_DIST_M = 100.0
+NMS_MAX_COUNT  = 10
+
+# 누적 히트맵의 망각 계수.
+# 단순 합계로 누적하면 초기에 파티클 200개가 몰려 있던 입수 지점 칸이
+# 영원히 1위가 되어, 표류가 진행돼도 수색 우선순위가 갱신되지 않는다.
+# 지수 감쇠를 걸어 "최근 체류 시간" 기준으로 만든다.
+HIST_HALF_LIFE_SEC = 20.0    # 이 시간이 지나면 과거 기여도가 절반
+HIST_DECAY = 0.5 ** ((DT * SPEED) / HIST_HALF_LIFE_SEC)
+
+accumulated_hist = np.zeros((GRID_NX, GRID_NY))
 best_trail_lons  = [MAPO_LON]
 best_trail_lats  = [MAPO_LAT]
 stranded_lons    = []
@@ -122,6 +165,28 @@ _step            = 0
 
 def filter_in_river(lons, lats):
     return contains_xy(hangang_union, lons, lats)
+
+
+def select_spaced(sorted_wps, min_dist_m, max_count):
+    """확률 내림차순 waypoint 에서 서로 min_dist_m 이상 떨어진 것만 골라낸다.
+
+    비최대 억제(NMS). 상위 확률 칸은 서로 인접해 있어서 그대로 쓰면
+    수색 구역이 한 점에 뭉친다.
+    """
+    picked = []
+    for wp in sorted_wps:
+        too_close = False
+        for p in picked:
+            de = (wp["lon"] - p["lon"]) * M_PER_DEG_LON
+            dn = (wp["lat"] - p["lat"]) * M_PER_DEG_LAT
+            if de * de + dn * dn < min_dist_m * min_dist_m:
+                too_close = True
+                break
+        if not too_close:
+            picked.append(wp)
+            if len(picked) >= max_count:
+                break
+    return picked
 
 log("Computing initial river mask...")
 in_river      = filter_in_river(particles_lon, particles_lat)
@@ -197,41 +262,34 @@ def simulation_step():
     best_lon       = best_trail_lons[-1] if best_trail_lons else MAPO_LON
     best_lat       = best_trail_lats[-1] if best_trail_lats else MAPO_LAT
 
-    if len(lons_v) > 1:
-        center_lon = np.mean(lons_v)
-        center_lat = np.mean(lats_v)
-        spread = 0.0015
-
-        hist, xedges, yedges = np.histogram2d(
-            lons_v, lats_v, bins=15,
-            range=[
-                [center_lon - spread, center_lon + spread],
-                [center_lat - spread, center_lat + spread]
-            ]
-        )
+    # 강 안 파티클을 "고정" 격자에 누적한다 (격자는 지도 영역에 못박혀 있음).
+    # 매 스텝 과거분을 감쇠시켜, 오래된 체류 기록이 현재 우선순위를 가리지 않게 한다.
+    if len(lons_v) > 0:
+        hist, _, _ = np.histogram2d(lons_v, lats_v, bins=[GRID_XEDGES, GRID_YEDGES])
+        accumulated_hist *= HIST_DECAY
         accumulated_hist += hist
-        hist_prob = accumulated_hist / accumulated_hist.sum() * 100
+
+    # 누적이 남아 있으면 파티클이 전부 강 밖으로 나가도 waypoint 를 계속 제공한다
+    total = accumulated_hist.sum()
+    if total > 0:
+        hist_prob = accumulated_hist / total * 100
 
         heatmap        = hist_prob.T.tolist()
-        heatmap_extent = [center_lon - spread, center_lon + spread,
-                          center_lat - spread, center_lat + spread]
+        heatmap_extent = [map_lon_min, map_lon_max, map_lat_min, map_lat_max]
 
         max_idx  = np.unravel_index(hist_prob.argmax(), hist_prob.shape)
-        best_lon = float((xedges[max_idx[0]] + xedges[max_idx[0] + 1]) / 2)
-        best_lat = float((yedges[max_idx[1]] + yedges[max_idx[1] + 1]) / 2)
+        best_lon = float(GRID_XCENT[max_idx[0]])
+        best_lat = float(GRID_YCENT[max_idx[1]])
         best_trail_lons.append(best_lon)
         best_trail_lats.append(best_lat)
 
-        for i in range(hist_prob.shape[0]):
-            for j in range(hist_prob.shape[1]):
-                p = hist_prob[i, j]
-                if p > 0:
-                    waypoints.append({
-                        "lon":  float((xedges[i] + xedges[i + 1]) / 2),
-                        "lat":  float((yedges[j] + yedges[j + 1]) / 2),
-                        "prob": float(p),
-                    })
-        waypoints.sort(key=lambda x: x["prob"], reverse=True)
+        raw = [
+            {"lon": float(GRID_XCENT[i]), "lat": float(GRID_YCENT[j]),
+             "prob": float(hist_prob[i, j])}
+            for i, j in zip(*np.nonzero(hist_prob))
+        ]
+        raw.sort(key=lambda w: w["prob"], reverse=True)
+        waypoints = select_spaced(raw, NMS_MIN_DIST_M, NMS_MAX_COUNT)
 
     # 콘솔 waypoint 출력
     if elapsed_sec - last_printed_time >= PRINT_INTERVAL and waypoints:
@@ -268,6 +326,15 @@ def simulation_step():
                 "lon_min": lon_min, "lon_max": lon_max,
                 "lat_min": lat_min, "lat_max": lat_max,
             },
+            # 실물 축소 지도 (드론 미션 좌표 변환의 기준)
+            "map": {
+                "scale":   MAP_SCALE,
+                "width_m":  MAP_W_M / MAP_SCALE,   # 지도 실물 가로 (m)
+                "height_m": MAP_H_M / MAP_SCALE,   # 지도 실물 세로 (m)
+                "lon_min": map_lon_min, "lon_max": map_lon_max,
+                "lat_min": map_lat_min, "lat_max": map_lat_max,
+                "origin_lon": MAPO_LON, "origin_lat": MAPO_LAT,
+            },
         })
 
 
@@ -285,6 +352,14 @@ log("[SIM] Background simulation started")
 # ─────────────────────────────────────────
 app = FastAPI(title="Han River Drift")
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# 드론 미션 라우터 (/mission)
+def _state_snapshot():
+    with sim_lock:
+        return dict(sim_state)
+
+drone_api.set_state_provider(_state_snapshot)
+app.include_router(drone_api.router)
 
 
 class ObservationIn(BaseModel):

@@ -55,13 +55,20 @@
 | 베스트 포인트 궤적 | 가장 확률 높은 지점의 이동 경로 시각화 |
 | 육지 도달 포인트 마커 | 익수자가 표류 후 쓰러져 있을 수 있는 육지 지점 표시 |
 | 배속 시뮬레이션 | `SPEED` 파라미터로 N분 후 위치를 빠르게 예측 |
+| **드론 수색 연동** | Waypoint를 축소 지도 위 Tello 좌표로 변환해 실기체 자율 비행 |
 
 > **히트맵 계산 방식**  
-> 현재 강물 위에 있는 파티클(`lons_v`, `lats_v`)의 중심 위치를 기준으로 가로 15칸 × 세로 15칸의 격자를 생성합니다.  
-> 각 격자 칸에 들어있는 파티클 수의 누적 비율(%)을 계산하여 `hist_prob` 배열에 저장합니다.
+> 축소 지도 영역(실제 450m × 300m)에 **고정된** 가로 30칸 × 세로 20칸 격자(칸당 15m)를 씁니다.  
+> 매 스텝 강물 위 파티클을 격자에 누적하되, 과거 기여도를 지수 감쇠(반감기 20초)시켜 **최근 체류 시간** 분포를 만듭니다.
+>
+> 격자를 파티클 무게중심에 맞춰 매번 재생성하면 서로 다른 좌표계의 카운트를 더하게 되어 누적 확률이 뭉개집니다. 그래서 격자를 지도에 못박았습니다.
 
 > **Waypoint 형식**  
-> `(경도, 위도, 확률)` 튜플 형태로 `waypoints` 리스트에 담아 내림차순 정렬합니다.
+> `{"lon":…, "lat":…, "prob":…}` 형태로 확률 내림차순 정렬합니다.  
+> `prob` 은 **누적 확률이 아니라 최근 체류 비율(%)** 입니다.
+>
+> 확률 상위 칸은 서로 인접해 있어 그대로 쓰면 수색 구역이 한 점에 뭉칩니다.  
+> 비최대 억제(NMS)로 **서로 100m 이상 떨어진 지점만** 골라냅니다.
 
 ---
 
@@ -86,11 +93,20 @@
 ```
 arda-algo_general/
 ├── hanriver.py          # FastAPI 서버 + 시뮬레이션 엔진
+├── drone_api.py         # 드론 엔드포인트 (/mission, /drone/*)
+├── tello_mission.py     # 위경도 → 축소 지도 → Tello 기체좌표 변환
+├── tello_driver.py      # Tello 제어 (djitellopy) + DRY-RUN 모드
+├── fly.py               # ★ 드론 데모 실행 파일 (이것 하나만 실행)
+├── drone_cli.py         # 개별 명령 CLI (비상 착륙 등)
 ├── static/
 │   └── index.html       # 브라우저 시각화 (Canvas + WebSocket)
+├── cache/               # OSM 폴리곤 캐시 (삭제 금지 — 오프라인 실행에 필요)
 ├── requirements.txt     # 패키지 목록
 └── .venv/               # 가상환경 (Python 3.10)
 ```
+
+> ⚠️ `cache/` 를 지우면 인터넷 없이 서버가 뜨지 않습니다.  
+> Tello WiFi에 연결하면 인터넷이 끊기므로 이 캐시가 필수입니다.
 
 ---
 
@@ -113,7 +129,7 @@ py -3.10 -m venv .venv
 python -m pip install --upgrade pip
 
 # 4. 패키지 설치
-pip install numpy matplotlib "shapely>=2.0" osmnx geopandas fiona pyproj requests networkx pyqt5 fastapi "uvicorn[standard]"
+pip install numpy matplotlib "shapely>=2.0" osmnx geopandas fiona pyproj requests networkx pyqt5 fastapi "uvicorn[standard]" python-dotenv djitellopy
 ```
 
 또는 requirements.txt로 한 번에 설치:
@@ -161,9 +177,12 @@ http://localhost:8000
 TURBULENCE = 0.3
 
 # 배속 (1프레임당 시뮬레이션 스텝 수)
-# SPEED = 60  →  1프레임 = 6초 시뮬레이션 (30분을 약 30초에 확인)
-# SPEED = 300 →  1프레임 = 30초 시뮬레이션 (30분을 약 6초에 확인)
-SPEED = 60
+# SPEED = 1   →  약 1.5~2배속 (드론 실기 연동용 기본값)
+# SPEED = 60  →  약 90배속 (화면으로 빠르게 훑어볼 때)
+#
+# 드론 연동 시 반드시 1 로 두세요.
+# 60 이면 드론이 이륙하기도 전에 파티클이 지도를 벗어납니다.
+SPEED = 1
 
 # 입수 지점 (실제: 열화상 카메라 감지 좌표)
 MAPO_LAT = 37.540
@@ -220,6 +239,11 @@ velocity_x, velocity_y = get_velocity()  # ← 이 줄 주석 해제
 | `GET` | `/river-geojson` | 한강 폴리곤 GeoJSON |
 | `POST` | `/observation` | 관측값 입력 `{"lon": ..., "lat": ...}` |
 | `WS` | `/ws` | WebSocket 실시간 상태 스트림 |
+| `GET` | `/mission` | Waypoint를 Tello 기체좌표로 변환 (`?top_n=3`) |
+| `POST` | `/drone/connect` | 기체 연결 `{"dry_run": true}` |
+| `POST` | `/drone/start` | 미션 실행 `{"top_n":3,"speed":30,"hover_sec":3}` |
+| `POST` | `/drone/land` | 즉시 착륙 (비상 정지) |
+| `GET` | `/drone/status` | 배터리·진행률·종료 사유 |
 
 ---
 
@@ -261,11 +285,22 @@ velocity_x, velocity_y = get_velocity()  # ← 이 줄 주석 해제
 | `TURBULENCE` | 0.3 | 난류 강도 (0=층류, 1.0=최대 난류) |
 | `DIFFUSIVITY` | 2.0 | 확산 계수 (클수록 넓게 퍼짐) |
 | `DT` | 0.1 | 시뮬레이션 타임스텝 (초) |
-| `SPEED` | 60 | 배속 (1프레임당 스텝 수, 60 = 6초/프레임) |
-| `spread` | 0.0015 | 히트맵 범위 (위경도 단위) |
+| `SPEED` | 1 | 배속 (1프레임당 스텝 수). **드론 연동 시 1 고정** |
 | `WIDTH` | 900m | 마포대교 구간 하천 폭 |
 | `DEPTH` | 6m | 마포대교 구간 평균 수심 |
 | `PRINT_INTERVAL` | 180초 | 콘솔 Waypoint 출력 주기 |
+
+### 지도 · 격자 · Waypoint
+
+| 파라미터 | 기본값 | 설명 |
+|----------|--------|------|
+| `MAP_SCALE` | 150 | 축척 1:150 |
+| `MAP_W_M` / `MAP_H_M` | 450m / 300m | 지도가 담는 실제 영역 (실물 3m × 2m) |
+| `MAP_EAST_M` | 50m | 입수 지점을 지도 동쪽 끝에서 안쪽으로 둘 거리 |
+| `GRID_NX` / `GRID_NY` | 30 / 20 | 누적 격자 칸 수 (칸당 15m) |
+| `HIST_HALF_LIFE_SEC` | 20초 | 히트맵 망각 반감기 |
+| `NMS_MIN_DIST_M` | 100m | Waypoint 간 최소 간격 (지도상 67cm) |
+| `NMS_MAX_COUNT` | 10 | Waypoint 최대 개수 |
 
 ---
 
@@ -375,9 +410,141 @@ def publish_waypoints(pub):
 
 ---
 
+## 드론 수색 연동 (DJI Tello)
+
+예측된 Waypoint로 **Tello가 축소 지도 위를 실제로 비행**합니다.
+
+### 왜 축소 지도인가
+
+Tello에는 **GPS가 없습니다.** `go x y z speed`(현재 위치 기준 상대 이동, cm)만 있습니다. 게다가 실제 탐색 영역은 수백 미터라 실물 크기로는 날 수 없습니다.
+
+그래서 **실제 450m × 300m 를 3m × 2m 축소 지도(축척 1:150)로 옮겨** 그 위를 비행시킵니다.
+
+### 실물 배치
+
+```
+                    지도 북쪽 (N)
+      ┌──────────────────────────────────────────┐  ─┐
+      │                                          │   │
+      │                                     ▲    │  100cm
+  서  │                                    (0,0) │  ─┤  2.0 m
+ (W)  │                                   드론   │  100cm
+      │                                          │   │
+      └──────────────────────────────────────────┘  ─┘
+      |←─────────────── 3.0 m ─────────────→|33.3cm|
+                                                    동 (E)
+```
+
+| 항목 | 값 |
+|------|-----|
+| 실물 지도 | 3.0m (동서) × 2.0m (남북) |
+| 축척 | 1:150 (실제 450m × 300m) |
+| 원점(이륙 지점) | 지도 동쪽 끝에서 **33.3cm** 안쪽, 남북 **정중앙** |
+| 기수 방향 | **지도 북쪽 고정. 비행 중 회전 금지** |
+| 필요 공간 | 최소 4m × 3m, 권장 5m × 4m (천장 2.5m 이상) |
+
+**기수 정렬이 가장 중요합니다.** 회전하면 yaw 오차가 이후 모든 이동에 누적되는데, 일반 Tello는 실제로 몇 도 돌았는지 알려주지 않아 보정이 불가능합니다. 지도에 `N` 화살표를 표시해두고 거기 맞춰 내려놓으세요.
+
+> 인쇄 지도는 광류 센서에 유리합니다. 무늬가 풍부해 단색 바닥보다 위치 추정이 안정적입니다.
+
+### 좌표계
+
+```
+원점 (0,0)  = 드론 이륙 지점 = 지도 위 입수 지점 (빨간 별 ★)
+
+Tello 기체축 (기수가 북일 때)
+    x (forward) = 북 (North)
+    y (left)    = 서 (West)   ← 동쪽은 음수
+```
+
+`go` 명령의 y 부호는 Tello SDK에도 djitellopy에도 문서화되어 있지 않습니다. 방향이 명확한 `left` 명령을 기준자로 삼아 **실기 검증한 결과 좌(+) = 항공 표준 FLU** 가 맞았습니다.
+
+### 실행
+
+**창 1 — 서버**
+```powershell
+python hanriver.py
+```
+
+**창 2 — 드론**
+```powershell
+python fly.py            # 실기체 비행
+python fly.py --dry      # 드론 없이 예행 연습
+python fly.py --yes      # 확인 프롬프트 생략
+```
+
+| 옵션 | 기본값 | 설명 |
+|------|--------|------|
+| `--top` | 3 | 수색 지점 수 (1~10) |
+| `--speed` | 30 | 비행 속도 cm/s (10~100) |
+| `--hover` | 3.0 | 지점별 정지 시간 (초) |
+| `--wait` | 100 | 파티클 확산 최대 대기 (초) |
+
+`fly.py` 가 하는 일:
+
+1. 서버 확인
+2. **WP1이 이륙 지점에서 충분히 멀어질 때까지 대기** — 서버 켜자마자 날리면 파티클이 입수 지점에 몰려 있어 WP1이 원점과 겹치고, Tello 최소 이동거리 20cm 미만이라 최우선 수색 지점을 건너뛰게 됩니다
+3. 기체 연결 + 배터리 확인
+4. 미션 미리보기 + 경고 표시
+5. 확인 후 비행, 진행 상황 실시간 출력
+6. 종료 사유 판정
+
+### 개별 명령
+
+```powershell
+python drone_cli.py status     # 상태
+python drone_cli.py mission    # 좌표 변환만 확인 (드론 불필요)
+python drone_cli.py land       # 비상 착륙
+python drone_cli.py watch      # 실시간 감시
+```
+
+> **비상 착륙(`drone_cli.py land`)을 다른 창에 미리 쳐두고 Enter 대기 상태로 두세요.**  
+> `fly.py` 의 `Ctrl+C` 는 그 프로세스가 살아있어야 동작합니다.
+
+### 안전장치
+
+| 조건 | 동작 |
+|------|------|
+| 배터리 30% 미만 | 이륙 거부 |
+| 지도 밖 waypoint | **미션 거부** |
+| 레그 500cm 초과 | 미션 거부 |
+| 레그 20cm 미만 | 해당 레그 건너뜀 |
+| 예외 발생 | `finally` 에서 **무조건 착륙** |
+| `/drone/land` | 즉시 중단 후 착륙 |
+
+### 미션 종료 사유
+
+`GET /drone/status` 의 `result` 필드로 판정합니다.
+
+| 값 | 의미 |
+|----|------|
+| `completed` | 정상 완료 — 모든 레그 실행 후 원점 복귀 |
+| `aborted` | 사용자 중단 |
+| `error` | 예외 발생 (착륙 실패 포함) |
+| `incomplete` | 레그 일부 미실행 |
+
+> ⚠️ `completed` 는 **"명령을 다 보냈다"**는 뜻이지 **"정확한 좌표에 도달했다"**는 뜻이 아닙니다.  
+> 일반 Tello는 절대 위치 센서가 없어 실제 오차를 알 수도, 보정할 수도 없습니다.  
+> 실내 광류 드리프트는 통상 ±20~50cm이며, Waypoint 간 최소 간격(지도상 67cm)보다 작아 구역 구분에는 지장이 없습니다.
+
+### 네트워크
+
+Tello는 자체 WiFi AP를 띄웁니다. 노트북을 `TELLO-XXXXXX` 에 연결하면 **인터넷이 끊기지만** 다음 이유로 문제없습니다.
+
+| 인터넷 필요 항목 | 상태 |
+|------------------|------|
+| OSM 폴리곤 다운로드 | `cache/` 에 캐시됨 — 오프라인 OK |
+| HRFCO 실시간 유속 | 기본값이 고정 유속이라 무관 |
+| FastAPI ↔ 브라우저 | `localhost` — 네트워크 무관 |
+
+**노트북 1대, 내장 WiFi, 동글 없이 완결됩니다.** 브라우저 화면을 다른 기기에 띄우려면 그때만 USB WiFi 동글이 필요합니다.
+
+---
+
 ## 참고
 
 - [한강홍수통제소 Open API](https://www.hrfco.go.kr/web/openapiPage/openApi.do)
+- [DJITelloPy](https://github.com/damiafuentes/DJITelloPy)
 - [FastAPI 공식 문서](https://fastapi.tiangolo.com)
 - [osmnx Documentation](https://osmnx.readthedocs.io)
 - [Shapely Documentation](https://shapely.readthedocs.io)
