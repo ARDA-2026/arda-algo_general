@@ -92,6 +92,23 @@ class TelloDriver:
         self.phase = "connecting"
         try:
             from djitellopy import Tello
+
+            # 이전 인스턴스를 반드시 먼저 정리한다.
+            # djitellopy 는 Tello() 생성 시 전역 drones[host] 에 등록하고
+            # __del__ -> end() 에서 그 항목을 삭제한다 (tello.py:127, 1024).
+            # 정리 없이 self._tello = Tello() 로 재대입하면
+            #   ① 새 인스턴스가 drones 등록
+            #   ② 옛 인스턴스 참조 소멸 -> __del__ -> 방금 등록한 항목 삭제
+            # 순서가 되어, 응답 수신 스레드가 "address not in drones" 로
+            # 모든 응답을 버린다. 즉 두 번째 연결부터 무조건 타임아웃난다.
+            old, self._tello = self._tello, None
+            if old is not None:
+                try:
+                    old.end()
+                except Exception:
+                    pass
+                del old            # __del__ 을 여기서 끝내고 새 인스턴스를 만든다
+
             self._tello = Tello()
             self._tello.connect()                    # "command" 전송 후 ok 대기
             self.battery   = self._tello.get_battery()

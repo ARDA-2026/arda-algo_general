@@ -82,22 +82,39 @@ def build_mission(
     map_w_m,
     map_h_m,
     east_margin_m,
+    takeoff_lon=None,
+    takeoff_lat=None,
     top_n=3,
 ):
     """waypoint 리스트를 드론이 실행할 미션으로 변환한다.
 
     waypoints : [{"lon":..., "lat":..., "prob":...}, ...] 확률 내림차순
+
+    두 개의 기준점을 쓴다. 섞으면 안 된다.
+      origin  = 입수 지점. 지도 사각형이 이 점을 기준으로 정의되므로
+                "지도 밖인가" 판정은 반드시 이 기준으로 한다.
+      takeoff = 드론이 실제로 이륙하는 자리. Tello 는 이륙 지점을 (0,0) 으로
+                삼는 상대 좌표계라, go 명령용 좌표는 이 기준이어야 한다.
+
     반환값의 legs 는 "지령 위치" 기준 상대 이동량이다.
     Tello 는 절대 위치를 모르므로 실측이 아닌 지령 위치를 누적 추적해야 한다.
     """
+    if takeoff_lon is None:
+        takeoff_lon, takeoff_lat = origin_lon, origin_lat
+
     points   = []
     warnings = []
 
     for rank, wp in enumerate(waypoints[:top_n], 1):
+        # ① 지도 경계 판정 — 입수 지점 기준
         east_real, north_real = geo_to_enu(wp["lon"], wp["lat"], origin_lon, origin_lat)
         east_map,  north_map  = enu_to_map(east_real, north_real, scale)
-        x_cm, y_cm            = map_to_tello_cm(east_map, north_map)
         ok = in_map_bounds(east_map, north_map, map_w_m, map_h_m, east_margin_m)
+
+        # ② 기체 좌표 — 이륙 지점 기준
+        te, tn = geo_to_enu(wp["lon"], wp["lat"], takeoff_lon, takeoff_lat)
+        tem, tnm = enu_to_map(te, tn, scale)
+        x_cm, y_cm = map_to_tello_cm(tem, tnm)
 
         if not ok:
             warnings.append(
@@ -150,7 +167,7 @@ def build_mission(
 
         legs.append(leg)
 
-    # 마지막에 원점 복귀
+    # 마지막에 이륙 지점으로 복귀 (기체 좌표 0,0)
     back_dist = (cur_x ** 2 + cur_y ** 2) ** 0.5
     legs.append({
         "seq":     len(legs) + 1,
@@ -159,11 +176,12 @@ def build_mission(
         "dy_cm":   round(-cur_y, 1),
         "dist_cm": round(back_dist, 1),
         "skip":    back_dist < GO_MIN_CM,
-        "reason":  "이미 원점 부근" if back_dist < GO_MIN_CM else "",
+        "reason":  "이미 이륙 지점 부근" if back_dist < GO_MIN_CM else "",
     })
 
     return {
-        "origin":   {"lon": origin_lon, "lat": origin_lat},
+        "origin":   {"lon": origin_lon,  "lat": origin_lat},
+        "takeoff":  {"lon": takeoff_lon, "lat": takeoff_lat},
         "scale":    scale,
         "map":      {"width_m": map_w_m, "height_m": map_h_m,
                      "east_margin_m": east_margin_m},

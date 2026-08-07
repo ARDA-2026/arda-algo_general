@@ -57,6 +57,8 @@ def _current_mission(top_n):
         wps,
         origin_lon=m["origin_lon"],
         origin_lat=m["origin_lat"],
+        takeoff_lon=m.get("takeoff_lon"),
+        takeoff_lat=m.get("takeoff_lat"),
         scale=scale,
         map_w_m=m["width_m"],
         map_h_m=m["height_m"],

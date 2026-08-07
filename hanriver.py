@@ -18,10 +18,10 @@ def log(*args):
 from shapely.ops import unary_union
 from shapely import contains_xy
 import osmnx as ox
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 
 import drone_api
@@ -122,30 +122,96 @@ last_printed_time = -PRINT_INTERVAL
 M_PER_DEG_LON = 88000    # 위도 37.5° 기준
 M_PER_DEG_LAT = 111000
 
-MAP_SCALE    = 150            # 1:150
-MAP_W_M      = 3.0 * MAP_SCALE  # 450 m (동서, 지도 긴 변)
-MAP_H_M      = 2.0 * MAP_SCALE  # 300 m (남북, 지도 짧은 변)
-MAP_EAST_M   = 50.0           # 입수 지점에서 동쪽 여유 (나머지는 서쪽 표류 구간)
+MAP_SCALE   = 150     # 1:150
+MAP_PRINT_W = 3.0     # 실물 지도 가로 m (동서)
+MAP_PRINT_H = 2.0     # 실물 지도 세로 m (남북)
+MAP_EAST_M  = 50.0    # 입수 지점에서 동쪽 여유 (나머지는 서쪽 표류 구간)
 
-map_lon_max = MAPO_LON + MAP_EAST_M / M_PER_DEG_LON
-map_lon_min = map_lon_max - MAP_W_M / M_PER_DEG_LON
-map_lat_max = MAPO_LAT + (MAP_H_M / 2) / M_PER_DEG_LAT
-map_lat_min = MAPO_LAT - (MAP_H_M / 2) / M_PER_DEG_LAT
+GRID_CELL_M = 15.0    # 격자 한 칸이 덮을 실제 거리 (칸이 정사각형에 가깝게 유지됨)
 
-# 누적 격자는 지도 영역에 "고정" 한다.
-# (매 프레임 파티클 무게중심으로 재중심을 잡으면 서로 다른 좌표계의
-#  카운트를 더하게 되어 누적 확률이 뭉개진다.)
-GRID_NX = 30    # 450m / 30 = 15 m/칸
-GRID_NY = 20    # 300m / 20 = 15 m/칸
-GRID_XEDGES = np.linspace(map_lon_min, map_lon_max, GRID_NX + 1)
-GRID_YEDGES = np.linspace(map_lat_min, map_lat_max, GRID_NY + 1)
-GRID_XCENT  = (GRID_XEDGES[:-1] + GRID_XEDGES[1:]) / 2
-GRID_YCENT  = (GRID_YEDGES[:-1] + GRID_YEDGES[1:]) / 2
-
-# 수색 우선순위 waypoint 를 서로 떨어뜨리는 최소 간격.
-# 확률 상위 N개를 그냥 뽑으면 인접 칸이 나와 드론이 제자리에서 도는 것처럼 보인다.
+# 아래 값들은 전부 _rebuild_map() 이 채운다. 지도 설정이 바뀌면 다시 계산된다.
+MAP_W_M = MAP_H_M = 0.0
+map_lon_min = map_lon_max = map_lat_min = map_lat_max = 0.0
+GRID_NX = GRID_NY = 0
+GRID_XEDGES = GRID_YEDGES = GRID_XCENT = GRID_YCENT = None
 NMS_MIN_DIST_M = 100.0
-NMS_MAX_COUNT  = 10
+accumulated_hist = None
+new_map_cfg = None    # POST /map 에서 설정
+
+# ─────────────────────────────────────────
+# [3-2] 드론 이륙 지점
+# ─────────────────────────────────────────
+# 입수 지점과 분리해야 하는 이유:
+#   - 입수 지점은 열화상 카메라가 감지하는 값이라 사고마다 달라진다.
+#     이륙 자리는 물리적으로 고정돼 있어야 한다.
+#   - 둘이 겹치면 시작 직후 WP1 이 이륙 지점과 붙어버려서
+#     Tello 최소 이동거리(20cm) 미만이 되어 "수색 우선순위 1번"이 스킵된다.
+#   - 드론이 지도의 입수 지점 표식(★)을 깔고 앉는다.
+#
+# 기본값: 지도 동쪽 변에서 실물 30cm 바깥 (강변 베이스에서 출격하는 모양)
+TAKEOFF_MARGIN_MAP_M = 0.30   # 지도 밖으로 나갈 거리 (실물 m)
+
+takeoff_lon = takeoff_lat = 0.0
+takeoff_is_default = True     # 사용자가 직접 찍었으면 False. 지도가 바뀌어도 유지한다.
+new_takeoff = None            # POST /takeoff 에서 설정
+
+NMS_MAX_COUNT = 10
+
+
+def default_takeoff():
+    """지도 동쪽 변 바깥 TAKEOFF_MARGIN_MAP_M 지점."""
+    east = MAP_EAST_M + TAKEOFF_MARGIN_MAP_M * MAP_SCALE
+    return MAPO_LON + east / M_PER_DEG_LON, MAPO_LAT
+
+
+def _rebuild_map(print_w=None, print_h=None, scale=None, east_m=None):
+    """지도 설정을 바꾸고 거기에 딸린 것들을 전부 다시 계산한다.
+
+    누적 격자는 지도 영역에 "고정" 되어야 한다. 매 프레임 파티클 무게중심으로
+    재중심을 잡으면 서로 다른 좌표계의 카운트를 더하게 되어 누적이 뭉개진다.
+    따라서 지도가 바뀌면 격자도 통째로 새로 만들고 누적을 리셋해야 한다.
+    """
+    global MAP_SCALE, MAP_PRINT_W, MAP_PRINT_H, MAP_EAST_M, MAP_W_M, MAP_H_M
+    global map_lon_min, map_lon_max, map_lat_min, map_lat_max
+    global GRID_NX, GRID_NY, GRID_XEDGES, GRID_YEDGES, GRID_XCENT, GRID_YCENT
+    global NMS_MIN_DIST_M, accumulated_hist, takeoff_lon, takeoff_lat
+
+    if scale   is not None: MAP_SCALE   = float(scale)
+    if print_w is not None: MAP_PRINT_W = float(print_w)
+    if print_h is not None: MAP_PRINT_H = float(print_h)
+    if east_m  is not None: MAP_EAST_M  = float(east_m)
+
+    MAP_W_M = MAP_PRINT_W * MAP_SCALE          # 지도가 덮는 실제 거리 (동서)
+    MAP_H_M = MAP_PRINT_H * MAP_SCALE          # 동일 (남북)
+
+    map_lon_max = MAPO_LON + MAP_EAST_M / M_PER_DEG_LON
+    map_lon_min = map_lon_max - MAP_W_M / M_PER_DEG_LON
+    map_lat_max = MAPO_LAT + (MAP_H_M / 2) / M_PER_DEG_LAT
+    map_lat_min = MAPO_LAT - (MAP_H_M / 2) / M_PER_DEG_LAT
+
+    # 칸 크기를 먼저 정한 뒤 나눈다. 칸 수를 각각 자르면 큰 지도에서
+    # 상한(80)에 걸려 칸이 직사각형으로 찌그러진다.
+    GRID_MAX = 80
+    cell = max(GRID_CELL_M, MAP_W_M / GRID_MAX, MAP_H_M / GRID_MAX)
+    GRID_NX = int(max(5, min(GRID_MAX, round(MAP_W_M / cell))))
+    GRID_NY = int(max(5, min(GRID_MAX, round(MAP_H_M / cell))))
+    GRID_XEDGES = np.linspace(map_lon_min, map_lon_max, GRID_NX + 1)
+    GRID_YEDGES = np.linspace(map_lat_min, map_lat_max, GRID_NY + 1)
+    GRID_XCENT  = (GRID_XEDGES[:-1] + GRID_XEDGES[1:]) / 2
+    GRID_YCENT  = (GRID_YEDGES[:-1] + GRID_YEDGES[1:]) / 2
+
+    # waypoint 간 최소 간격은 지도 크기에 비례해야 한다.
+    # 고정 100m 로 두면 작은 지도에서는 지도 폭보다 커져 waypoint 가 1개만 남는다.
+    # 기본 지도(450m)에서 100m 가 되도록 잡은 비율.
+    NMS_MIN_DIST_M = MAP_W_M / 4.5
+
+    accumulated_hist = np.zeros((GRID_NX, GRID_NY))
+
+    if takeoff_is_default:
+        takeoff_lon, takeoff_lat = default_takeoff()
+
+
+_rebuild_map()
 
 # 누적 히트맵의 망각 계수.
 # 단순 합계로 누적하면 초기에 파티클 200개가 몰려 있던 입수 지점 칸이
@@ -154,7 +220,6 @@ NMS_MAX_COUNT  = 10
 HIST_HALF_LIFE_SEC = 20.0    # 이 시간이 지나면 과거 기여도가 절반
 HIST_DECAY = 0.5 ** ((DT * SPEED) / HIST_HALF_LIFE_SEC)
 
-accumulated_hist = np.zeros((GRID_NX, GRID_NY))
 best_trail_lons  = [MAPO_LON]
 best_trail_lats  = [MAPO_LAT]
 stranded_lons    = []
@@ -210,6 +275,22 @@ def simulation_step():
     global stranded_lons, stranded_lats
     global observation, obs_history, new_observation
     global _step, last_printed_time
+    global takeoff_lon, takeoff_lat, new_takeoff
+    global new_map_cfg, takeoff_is_default
+
+    # 지도 설정 변경 (POST /map). 격자가 통째로 바뀌므로 시뮬 스레드에서 적용한다.
+    if new_map_cfg is not None:
+        cfg, new_map_cfg = new_map_cfg, None
+        _rebuild_map(**cfg)
+        best_trail_lons.clear(); best_trail_lats.clear()
+        log(f"[MAP] {MAP_PRINT_W}x{MAP_PRINT_H}m 1:{MAP_SCALE:.0f} "
+            f"= 실제 {MAP_W_M:.0f}x{MAP_H_M:.0f}m, 격자 {GRID_NX}x{GRID_NY}")
+
+    # 새 이륙 지점 적용 (툴바에서 지정 → POST /takeoff)
+    if new_takeoff is not None:
+        takeoff_lon, takeoff_lat = new_takeoff
+        new_takeoff = None
+        takeoff_is_default = False
 
     # 새 관측값 적용 (마우스 클릭 → POST /observation)
     if new_observation is not None:
@@ -313,11 +394,15 @@ def simulation_step():
             "best_trail_lons": best_trail_lons[-200:],
             "best_trail_lats": best_trail_lats[-200:],
             "waypoints":       waypoints[:10],
-            "stranded_lons":   list(stranded_lons),
-            "stranded_lats":   list(stranded_lats),
+            # 좌초 지점과 관측 기록은 계속 쌓이는데 100ms 마다 통째로 전송된다.
+            # best_trail 과 같은 방식으로 잘라 보내고, 총계는 따로 실어준다.
+            "stranded_lons":   stranded_lons[-800:],
+            "stranded_lats":   stranded_lats[-800:],
+            "stranded_count":  len(stranded_lons),
             "observation":     list(observation) if observation else None,
-            "obs_history":     list(obs_history),
+            "obs_history":     obs_history[-50:],
             "in_river_count":  int(np.sum(in_river)),
+            "n_particles":     N,
             "velocity_x":      float(velocity_x),
             "turbulence":      TURBULENCE,
             "entry_lon":       MAPO_LON,
@@ -328,12 +413,21 @@ def simulation_step():
             },
             # 실물 축소 지도 (드론 미션 좌표 변환의 기준)
             "map": {
-                "scale":   MAP_SCALE,
-                "width_m":  MAP_W_M / MAP_SCALE,   # 지도 실물 가로 (m)
-                "height_m": MAP_H_M / MAP_SCALE,   # 지도 실물 세로 (m)
+                "scale":    MAP_SCALE,
+                "width_m":  MAP_PRINT_W,           # 지도 실물 가로 (m)
+                "height_m": MAP_PRINT_H,           # 지도 실물 세로 (m)
+                "real_w_m": MAP_W_M,               # 덮는 실제 거리 (동서)
+                "real_h_m": MAP_H_M,               # 덮는 실제 거리 (남북)
+                "east_m":   MAP_EAST_M,
+                "grid_nx":  GRID_NX, "grid_ny": GRID_NY,
+                "nms_m":    round(NMS_MIN_DIST_M, 1),
                 "lon_min": map_lon_min, "lon_max": map_lon_max,
                 "lat_min": map_lat_min, "lat_max": map_lat_max,
+                # origin  = 입수 지점. 지도 경계 판정의 지리 기준
+                # takeoff = 드론 이륙 자리. Tello 기체 좌표의 (0,0)
                 "origin_lon": MAPO_LON, "origin_lat": MAPO_LAT,
+                "takeoff_lon": float(takeoff_lon),
+                "takeoff_lat": float(takeoff_lat),
             },
         })
 
@@ -370,7 +464,12 @@ class ObservationIn(BaseModel):
 @app.get("/", response_class=HTMLResponse)
 async def index():
     with open("static/index.html", encoding="utf-8") as f:
-        return HTMLResponse(f.read())
+        # 캐시 금지. UI 를 고쳐도 브라우저가 옛 파일을 계속 쓰면
+        # "고쳤는데 왜 그대로냐" 로 시간을 버린다.
+        return HTMLResponse(f.read(), headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        })
 
 
 @app.get("/river-geojson")
@@ -388,6 +487,64 @@ async def get_state():
 async def post_observation(obs: ObservationIn):
     global new_observation
     new_observation = (obs.lon, obs.lat)
+    return {"ok": True}
+
+
+@app.post("/takeoff")
+async def post_takeoff(pt: ObservationIn):
+    """드론 이륙 지점을 지정한다 (Tello 기체 좌표의 원점).
+
+    비행 중에 바꾸면 지령 위치 누적이 어긋나므로 거부한다.
+    """
+    global new_takeoff
+    if drone_api.driver.status()["running"]:
+        raise HTTPException(409, "비행 중에는 이륙 지점을 바꿀 수 없습니다")
+    new_takeoff = (pt.lon, pt.lat)
+    return {"ok": True, "lon": pt.lon, "lat": pt.lat}
+
+
+@app.post("/takeoff/reset")
+async def post_takeoff_reset():
+    """기본 이륙 지점(지도 동쪽 변 바깥 30cm)으로 되돌린다."""
+    global new_takeoff, takeoff_is_default
+    if drone_api.driver.status()["running"]:
+        raise HTTPException(409, "비행 중에는 이륙 지점을 바꿀 수 없습니다")
+    new_takeoff = default_takeoff()
+    takeoff_is_default = True
+    return {"ok": True}
+
+
+class MapIn(BaseModel):
+    # 실물 지도 크기(m)와 축척. 덮는 실제 거리는 둘의 곱으로 정해진다.
+    width_m:  float = Field(3.0,   ge=0.3, le=20.0)
+    height_m: float = Field(2.0,   ge=0.3, le=20.0)
+    scale:    float = Field(150.0, ge=10.0, le=2000.0)
+    east_m:   float = Field(50.0,  ge=0.0, le=5000.0)  # 입수 지점에서 동쪽 여유
+
+
+@app.post("/map")
+async def post_map(cfg: MapIn):
+    """지도 영역을 바꾼다. 격자와 누적 히트맵이 리셋된다."""
+    global new_map_cfg
+    if drone_api.driver.status()["running"]:
+        raise HTTPException(409, "비행 중에는 지도를 바꿀 수 없습니다")
+    if cfg.east_m > cfg.width_m * cfg.scale:
+        raise HTTPException(
+            422, f"동쪽 여유({cfg.east_m:.0f}m)가 지도 가로"
+                 f"({cfg.width_m * cfg.scale:.0f}m)보다 큽니다")
+    new_map_cfg = {"print_w": cfg.width_m, "print_h": cfg.height_m,
+                   "scale": cfg.scale, "east_m": cfg.east_m}
+    return {"ok": True, **cfg.model_dump(),
+            "real_w_m": cfg.width_m * cfg.scale,
+            "real_h_m": cfg.height_m * cfg.scale}
+
+
+@app.post("/map/reset")
+async def post_map_reset():
+    global new_map_cfg
+    if drone_api.driver.status()["running"]:
+        raise HTTPException(409, "비행 중에는 지도를 바꿀 수 없습니다")
+    new_map_cfg = {"print_w": 3.0, "print_h": 2.0, "scale": 150.0, "east_m": 50.0}
     return {"ok": True}
 
 
