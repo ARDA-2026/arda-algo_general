@@ -105,7 +105,7 @@ arda-algo_general/
 │   └── index.html       # 브라우저 시각화 (Canvas + WebSocket)
 ├── cache/               # OSM 폴리곤 캐시 (삭제 금지 — 오프라인 실행에 필요)
 ├── requirements.txt     # 패키지 목록
-└── .venv/               # 가상환경 (Python 3.10)
+└── venv/                # 가상환경 (Python 3.10, git에는 안 올라감)
 ```
 
 > ⚠️ `cache/` 를 지우면 인터넷 없이 서버가 뜨지 않습니다.  
@@ -117,27 +117,52 @@ arda-algo_general/
 
 ### 환경 요구사항
 
-- Python 3.10
+- Python 3.10+
 
-### 가상환경 구축
+> `venv/`는 `.gitignore`에 등록되어 git에 올라가지 않습니다. 아래 명령어를 그대로 복붙하면 로컬에 가상환경을 새로 만들고 필요한 패키지를 전부 설치합니다.
 
-```powershell
-# 1. 가상환경 생성 (Python 3.10)
-py -3.10 -m venv .venv
+### macOS / Linux
 
-# 2. 가상환경 활성화
-.\.venv\Scripts\Activate.ps1
+```bash
+# 1. 저장소 클론 후 이동
+git clone <이 저장소 URL>
+cd arda-algo_general
 
-# 3. pip 업그레이드
+# 2. 가상환경 생성
+python3.10 -m venv venv
+
+# 3. 가상환경 활성화
+source venv/bin/activate
+
+# 4. pip 업그레이드
 python -m pip install --upgrade pip
 
+<<<<<<< Updated upstream
 # 4. 패키지 설치
 pip install numpy matplotlib "shapely>=2.0" osmnx geopandas fiona pyproj requests networkx pyqt5 fastapi "uvicorn[standard]" python-dotenv djitellopy
+=======
+# 5. 패키지 설치
+pip install -r requirements.txt
+>>>>>>> Stashed changes
 ```
 
-또는 requirements.txt로 한 번에 설치:
+### Windows (PowerShell)
 
 ```powershell
+# 1. 저장소 클론 후 이동
+git clone <이 저장소 URL>
+cd arda-algo_general
+
+# 2. 가상환경 생성
+py -3.10 -m venv venv
+
+# 3. 가상환경 활성화
+.\venv\Scripts\Activate.ps1
+
+# 4. pip 업그레이드
+python -m pip install --upgrade pip
+
+# 5. 패키지 설치
 pip install -r requirements.txt
 ```
 
@@ -145,14 +170,17 @@ pip install -r requirements.txt
 
 ## 실행 방법
 
+### macOS / Linux
+
+```bash
+source venv/bin/activate
+python hanriver.py
+```
+
+### Windows (PowerShell)
+
 ```powershell
-# 1. 프로젝트 폴더로 이동
-cd c:\Users\kmmjj\SS\arda-algo_general
-
-# 2. 가상환경 활성화
-.\.venv\Scripts\Activate.ps1
-
-# 3. 서버 실행
+.\venv\Scripts\Activate.ps1
 python hanriver.py
 ```
 
