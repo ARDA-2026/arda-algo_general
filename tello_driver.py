@@ -19,6 +19,7 @@ tello_mission.build_mission() 이 만든 legs 를 실제 기체에 흘려보낸�
   실제 위치는 드리프트로 조금씩 어긋나지만, 우리 계산 오차는 쌓이지 않는다.
 """
 
+import math
 import sys
 import threading
 import time
@@ -28,6 +29,11 @@ DEFAULT_SPEED = 30     # cm/s - go 명령 속도 (10~100)
 HOVER_SEC     = 3.0    # 각 waypoint 도착 후 정지 시간
 GO_MIN_CM     = 20
 GO_MAX_CM     = 500
+
+# ── 수동 모드 ──
+# 지점을 골라 하나씩 이동시키는 모드. 이동이 끝나도 착륙하지 않고 떠 있는다.
+# 떠 있는 채로 방치하면 배터리가 다해 추락하므로 유휴 시간 상한을 둔다.
+IDLE_LAND_SEC = 90.0
 
 
 class TelloDriver:
@@ -50,6 +56,16 @@ class TelloDriver:
         self.error     = None
         # 직전 미션의 종료 사유: None|completed|aborted|error|incomplete
         self.result    = None
+        # 수동 모드용. 이동이 끝나도 착륙하지 않고 떠 있는 상태를 추적한다.
+        self.airborne  = False
+        self.mode      = None       # auto(자동 순회) | manual(수동 이동)
+        self._last_cmd = 0.0        # 유휴 자동착륙 판단용
+        # 지령 위치의 자취. 수동 모드는 경로가 미리 정해지지 않으므로
+        # 화면에 "예정 경로" 대신 "실제 지나간 경로"를 그려야 한다.
+        self.path      = [(0.0, 0.0)]
+
+        # 수동 모드에서 떠 있는 채로 방치되는 걸 막는 감시 스레드
+        threading.Thread(target=self._idle_watch, daemon=True).start()
 
     # ── 내부 유틸 ───────────────────────────────────────────
     def _ev(self, msg):
@@ -73,6 +89,11 @@ class TelloDriver:
 
     def _busy(self):
         return self._thread is not None and self._thread.is_alive()
+
+    def _mark_path(self):
+        """지령 위치를 자취에 남긴다. 화면에 실제 경로를 그리는 근거."""
+        self.path.append((round(self.cur_x, 1), round(self.cur_y, 1)))
+        del self.path[:-60]
 
     # ── 연결 ────────────────────────────────────────────────
     def connect(self, dry_run=True):
@@ -149,9 +170,11 @@ class TelloDriver:
                 raise RuntimeError(f"leg{leg['seq']} 이동량이 {GO_MAX_CM}cm 초과")
 
         self.mission   = mission
+        self.mode      = "auto"
         self.leg_total = sum(1 for l in mission["legs"] if not l["skip"])
         self.leg_done  = 0
         self.cur_x = self.cur_y = 0.0
+        self.path   = [(0.0, 0.0)]
         self.error  = None
         self.result = None
         self._abort.clear()
@@ -195,6 +218,7 @@ class TelloDriver:
 
                 self.cur_x += dx
                 self.cur_y += dy
+                self._mark_path()
                 self.leg_done += 1
 
                 if self._abort.is_set():
@@ -236,19 +260,144 @@ class TelloDriver:
                 self.phase  = "ready"
             self._ev(f"미션 종료 ({self.result}) - leg {self.leg_done}/{self.leg_total}")
 
+    # ── 수동 모드 ───────────────────────────────────────────
+    def _check_ready(self):
+        if not self.connected:
+            raise RuntimeError("먼저 /drone/connect 로 연결하세요")
+        if self._busy():
+            raise RuntimeError("이미 명령을 수행 중입니다")
+
+    def _check_battery(self):
+        if not self.dry_run:
+            try:
+                self.battery = self._tello.get_battery()
+            except Exception:
+                pass
+        if self.battery is not None and self.battery < MIN_BATTERY:
+            raise RuntimeError(f"배터리 부족 {self.battery}% (최소 {MIN_BATTERY}%)")
+
+    def manual_takeoff(self):
+        """이륙만 하고 떠 있는다. 착륙은 명시적으로 해야 한다."""
+        self._check_ready()
+        if self.airborne:
+            raise RuntimeError("이미 비행 중입니다")
+        self._check_battery()
+
+        self.mode   = "manual"
+        self.result = None
+        self.error  = None
+        self.leg_done = self.leg_total = 0
+        self.cur_x = self.cur_y = 0.0
+        self.path  = [(0.0, 0.0)]
+        self._abort.clear()
+        self._thread = threading.Thread(target=self._run_takeoff, daemon=True)
+        self._thread.start()
+        self._ev(f"[수동] 이륙 (유휴 {IDLE_LAND_SEC:.0f}초 후 자동 착륙)")
+        return self.status()
+
+    def _run_takeoff(self):
+        try:
+            self.phase = "takeoff"
+            if not self.dry_run:
+                self._tello.takeoff()
+            else:
+                time.sleep(1.0)
+            self.airborne  = True
+            self._last_cmd = time.time()
+            self.phase     = "hovering"
+            self._ev("[수동] 이륙 완료 - 대기 중")
+        except Exception as e:
+            self.error = f"{type(e).__name__}: {e}"
+            self.phase = "error"
+            self._ev(f"[수동] 이륙 실패 - {self.error}")
+            self._force_land()
+
+    def manual_goto(self, x_cm, y_cm, speed=DEFAULT_SPEED, label=""):
+        """지령 위치에서 목표(x_cm, y_cm)로 한 번 이동한다. 착륙하지 않는다."""
+        self._check_ready()
+        if not self.airborne:
+            raise RuntimeError("먼저 이륙하세요")
+        self._check_battery()
+
+        dx, dy = x_cm - self.cur_x, y_cm - self.cur_y
+        if max(abs(dx), abs(dy)) < GO_MIN_CM:
+            raise RuntimeError(
+                f"이동량이 {math.hypot(dx, dy):.0f}cm 로 Tello 최소 {GO_MIN_CM}cm 미만입니다")
+        if max(abs(dx), abs(dy)) > GO_MAX_CM:
+            raise RuntimeError(
+                f"이동량이 {math.hypot(dx, dy):.0f}cm 로 최대 {GO_MAX_CM}cm 를 넘습니다")
+
+        self._abort.clear()
+        self._thread = threading.Thread(
+            target=self._run_goto, args=(dx, dy, speed, label), daemon=True)
+        self._thread.start()
+        return self.status()
+
+    def _run_goto(self, dx, dy, speed, label):
+        try:
+            self.phase = "flying"
+            idx, idy = int(round(dx)), int(round(dy))
+            self._ev(f"[수동] {label or '이동'}  go({idx}, {idy}, 0, {speed})")
+            if not self.dry_run:
+                self._tello.go_xyz_speed(idx, idy, 0, speed)
+            else:
+                time.sleep(max(0.4, math.hypot(idx, idy) / speed))
+            self.cur_x += idx
+            self.cur_y += idy
+            self._mark_path()
+            self.leg_done += 1
+            self.leg_total = self.leg_done
+            self._last_cmd = time.time()
+            self.phase = "hovering"
+            self._ev(f"[수동] 도착 - 지령 ({self.cur_x:+.0f}, {self.cur_y:+.0f})cm")
+        except Exception as e:
+            self.error = f"{type(e).__name__}: {e}"
+            self._ev(f"[수동] 이동 실패 - {self.error}")
+            self._force_land()
+
+    def _force_land(self):
+        """오류 시 즉시 착륙시킨다."""
+        try:
+            if not self.dry_run and self._tello is not None:
+                self._tello.land()
+        except Exception:
+            pass
+        self.airborne = False
+        self.phase    = "error"
+        self.result   = "error"
+
+    def _idle_watch(self):
+        """떠 있는 채로 방치되면 자동 착륙시킨다. 배터리 소진 추락 방지."""
+        while True:
+            time.sleep(2.0)
+            if not (self.airborne and self.phase == "hovering"):
+                continue
+            idle = time.time() - self._last_cmd
+            if idle >= IDLE_LAND_SEC:
+                self._ev(f"[수동] 유휴 {idle:.0f}초 - 자동 착륙")
+                self.land_now()
+
     # ── 비상 착륙 ───────────────────────────────────────────
     def land_now(self):
         self._abort.set()
         self._ev("착륙 요청 (abort)")
         if self._busy():
-            return self.status()          # 실행 스레드의 finally 가 착륙시킨다
+            # 자동 모드는 실행 스레드의 finally 가 착륙시킨다.
+            # 수동 모드는 이동이 끝나도 떠 있으므로 여기서 직접 내린다.
+            if self.mode != "manual":
+                return self.status()
         try:
             if not self.dry_run and self._tello is not None:
                 self._tello.land()
-            self.phase = "ready"
+            self.airborne = False
+            self.phase    = "ready"
+            if self.mode == "manual":
+                self.result = "completed"
             self._ev("착륙 완료")
         except Exception as e:
+            self.airborne = False
             self.error = f"{type(e).__name__}: {e}"
+            self.phase = "error"
             self._ev(f"착륙 실패 - {self.error}")
         return self.status()
 
@@ -271,6 +420,11 @@ class TelloDriver:
             "cur_x_cm":    round(self.cur_x, 1),
             "cur_y_cm":    round(self.cur_y, 1),
             "running":     self._busy(),
+            "airborne":    self.airborne,    # 수동 모드에서 떠 있는 상태
+            "mode":        self.mode,        # auto | manual
+            "path":        list(self.path),
+            "idle_left":   (round(max(0.0, IDLE_LAND_SEC - (time.time() - self._last_cmd)))
+                            if (self.airborne and self.phase == "hovering") else None),
             "result":      self.result,      # completed|aborted|error|incomplete
             "error":       self.error,
             "events":      list(self.events[-15:]),

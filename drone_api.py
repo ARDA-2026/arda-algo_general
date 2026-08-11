@@ -10,7 +10,8 @@ hanriver.py 를 import 하지 않는다. 순환 import 를 피하려고
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from tello_mission import M_PER_DEG_LON, build_mission
+from tello_mission import (M_PER_DEG_LON, build_mission,
+                           geo_to_enu, enu_to_map, map_to_tello_cm, in_map_bounds)
 from tello_driver import driver
 
 router = APIRouter()
@@ -20,6 +21,14 @@ _get_state = None
 
 class ConnectIn(BaseModel):
     dry_run: bool = True        # 기본은 안전하게 시뮬레이션
+
+
+class GotoIn(BaseModel):
+    """수동 이동 목표. 화면에서 본 좌표를 그대로 보낸다."""
+    lon:   float
+    lat:   float
+    speed: int = Field(30, ge=10, le=100)
+    label: str = ""
 
 
 class StartIn(BaseModel):
@@ -106,6 +115,55 @@ async def drone_start(body: StartIn):
     except RuntimeError as e:
         raise HTTPException(409, str(e))
     return {"status": st, "mission": mission}
+
+
+# ── 수동 모드 ──
+# 자동 순회와 달리 이동 후에도 착륙하지 않고 떠 있는다.
+# 지점을 하나씩 골라 보내는 운용 방식.
+@router.post("/drone/takeoff")
+async def drone_takeoff():
+    """이륙만 한다. 이후 /drone/goto 로 지점을 하나씩 지정한다."""
+    try:
+        return driver.manual_takeoff()
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+
+@router.post("/drone/goto")
+async def drone_goto(body: GotoIn):
+    """지정한 좌표로 한 번 이동한다 (착륙 안 함)."""
+    if _get_state is None:
+        raise HTTPException(503, "상태 제공자가 등록되지 않았습니다")
+    st = _get_state()
+    if not st or not st.get("map"):
+        raise HTTPException(503, "시뮬레이션이 아직 준비되지 않았습니다")
+
+    m = st["map"]
+    margin = (m["lon_max"] - m["origin_lon"]) * M_PER_DEG_LON / m["scale"]
+
+    # 지도 경계 판정은 입수 지점 기준, 기체 좌표는 이륙 지점 기준
+    e, n   = geo_to_enu(body.lon, body.lat, m["origin_lon"], m["origin_lat"])
+    em, nm = enu_to_map(e, n, m["scale"])
+    if not in_map_bounds(em, nm, m["width_m"], m["height_m"], margin):
+        raise HTTPException(409, "목표가 지도 밖입니다")
+
+    te, tn   = geo_to_enu(body.lon, body.lat, m["takeoff_lon"], m["takeoff_lat"])
+    tem, tnm = enu_to_map(te, tn, m["scale"])
+    x_cm, y_cm = map_to_tello_cm(tem, tnm)
+
+    try:
+        return driver.manual_goto(x_cm, y_cm, speed=body.speed, label=body.label)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+
+@router.post("/drone/home")
+async def drone_home(speed: int = Query(30, ge=10, le=100)):
+    """이륙 지점(기체 좌표 0,0)으로 돌아간다. 착륙은 하지 않는다."""
+    try:
+        return driver.manual_goto(0.0, 0.0, speed=speed, label="이륙 지점 복귀")
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
 
 
 @router.post("/drone/land")

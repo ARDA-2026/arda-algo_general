@@ -194,6 +194,12 @@ h2 { font-size: 14px; color: var(--accent); text-align: center; padding-bottom: 
       <button id="m-dry"  class="on" onclick="setMode('dry')">DRY RUN</button>
       <button id="m-real"           onclick="setMode('real')">실기체</button>
     </div>
+    <div class="seg">
+      <button id="k-manual" class="on" onclick="setKind('manual')"
+              title="지점을 골라 하나씩 이동. 이동 후에도 떠 있음">수동 이동</button>
+      <button id="k-auto"           onclick="setKind('auto')"
+              title="TOP1→2→3→복귀 자동 순회 후 착륙">자동 순회</button>
+    </div>
     <button class="btn" id="btn-connect" onclick="droneConnect()">연결</button>
 
     <div class="stat" style="margin-top:9px;align-items:center">
@@ -227,7 +233,13 @@ h2 { font-size: 14px; color: var(--accent); text-align: center; padding-bottom: 
     <div id="mission-meta" class="stat" style="margin-top:5px"></div>
     <div id="mission-warn"></div>
 
+    <!-- 자동 순회 -->
     <button class="btn go" id="btn-start" style="margin-top:9px" onclick="onStartClick()">미션 시작</button>
+    <!-- 수동 이동 -->
+    <div id="manual-ctl" style="margin-top:9px;display:flex;gap:6px">
+      <button class="btn go" id="btn-launch" onclick="onTakeoffClick()">이륙</button>
+      <button class="btn"    id="btn-home" style="flex:0 0 38%" onclick="droneHome()">복귀</button>
+    </div>
     <div class="why" id="start-why"></div>
 
     <h3 style="margin-top:11px">이벤트</h3>
@@ -789,6 +801,19 @@ function drawTriangle(x, y, s, color) {
   ctx.closePath(); ctx.fill(); ctx.stroke();
 }
 function drawWaypoints(wps, n) {
+  // 수동 모드에서 이미 다녀온 지점은 체크로 표시한다 (지령 자취와 대조)
+  const visited = [];
+  if (droneKind === 'manual' && droneStatus && droneStatus.path && state && state.map) {
+    const m = state.map;
+    wps.slice(0, n).forEach((wp, i) => {
+      const hit = droneStatus.path.some(([px, py]) => {
+        const [lon, lat] = droneCmToLonLat(m, px, py);
+        return Math.abs(lon - wp.lon) * M_LON < 8 && Math.abs(lat - wp.lat) * M_LAT < 8;
+      });
+      if (hit) visited[i] = true;
+    });
+  }
+
   wps.slice(0, n).forEach((wp, i) => {
     const [x, y] = toCanvas(wp.lon, wp.lat);
     ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2);
@@ -799,6 +824,13 @@ function drawWaypoints(wps, n) {
     ctx.fillStyle = C.wpText; ctx.font = 'bold 9px sans-serif';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(String(i + 1), x, y);
+
+    if (visited[i]) {
+      ctx.strokeStyle = C.pathDone; ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(x + 5, y + 10); ctx.lineTo(x + 8, y + 13); ctx.lineTo(x + 14, y + 5);
+      ctx.stroke();
+    }
   });
 }
 
@@ -866,6 +898,46 @@ function drawFlightPath(mission, st, m) {
       ctx.closePath(); ctx.fill();
     }
   });
+}
+
+// 수동 모드는 경로가 미리 정해지지 않는다. "예정 경로" 대신
+// 서버가 기록한 지령 위치의 자취(실제 지나간 길)를 그린다.
+function droneCmToLonLat(m, x_cm, y_cm) {
+  const [t0lon, t0lat] = takeoffPt(m);
+  return [t0lon + (-y_cm / 100 * m.scale) / M_LON,
+          t0lat + ( x_cm / 100 * m.scale) / M_LAT];
+}
+
+function drawDronePath(st, m) {
+  if (!st || !m || !st.path || st.path.length < 2) return;
+  const pts = st.path.map(([x, y]) => toCanvas(...droneCmToLonLat(m, x, y)));
+
+  ctx.save();
+  ctx.strokeStyle = C.pathDone; ctx.lineWidth = 2.5;
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.beginPath();
+  pts.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
+  ctx.stroke();
+
+  // 경유한 지점마다 작은 표식 (출발점 제외)
+  ctx.fillStyle = C.pathDone;
+  pts.slice(1).forEach(([x, y]) => {
+    ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+  });
+
+  // 이동 중이면 마지막 지점에서 현재 지령 위치까지 파선으로 잇는다
+  if (st.running) {
+    const [lx, ly] = pts[pts.length - 1];
+    const [cx, cy] = toCanvas(...droneCmToLonLat(m, st.cur_x_cm, st.cur_y_cm));
+    if (Math.hypot(cx - lx, cy - ly) > 3) {
+      ctx.strokeStyle = C.pathTodo; ctx.lineWidth = 1.8;
+      ctx.setLineDash([6, 5]);
+      ctx.lineDashOffset = -(performance.now() / 60) % 11;
+      ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(cx, cy); ctx.stroke();
+      ctx.setLineDash([]); ctx.lineDashOffset = 0;
+    }
+  }
+  ctx.restore();
 }
 
 // 드론 이륙 지점 = Tello 기체 좌표의 (0,0). 입수 지점(★)과는 다른 점이다.
@@ -1005,7 +1077,9 @@ function render() {
     drawStar(ex, ey, 10, C.entry);
   }
 
-  drawFlightPath(mission, droneStatus, m);
+  // 자동은 미리 정해진 경로, 수동은 실제 지나간 자취
+  if (droneKind === 'auto') drawFlightPath(mission, droneStatus, m);
+  else                      drawDronePath(droneStatus, m);
   drawTakeoff(m);
   drawDroneMarker(droneStatus, m);
   drawMapFrame(m);
@@ -1090,9 +1164,12 @@ function buildLegend() {
     row({ c: C.obs },      '관측값 (클릭)'),
     row({ c: C.wp[0] },    '수색 우선순위'),
     row({ c: C.mapFrame, d: 'dashed' }, '실물 지도 경계', 'line'),
-    row({ c: C.pathDone }, '완료한 비행 레그', 'line'),
-    row({ c: C.pathTodo }, '예정 경로', 'line'),
-    row({ c: C.pathSkip, d: 'dotted' }, '건너뛴 레그 (20cm 미만)', 'line'),
+    ...(droneKind === 'auto'
+      ? [row({ c: C.pathDone }, '완료한 비행 레그', 'line'),
+         row({ c: C.pathTodo }, '예정 경로', 'line'),
+         row({ c: C.pathSkip, d: 'dotted' }, '건너뛴 레그 (20cm 미만)', 'line')]
+      : [row({ c: C.pathDone }, '드론이 지나간 경로', 'line'),
+         row({ c: C.pathTodo }, '이동 중 (목표까지)', 'line')]),
     row({ c: C.takeoff },  '드론 이륙 지점 (0,0)'),
     row({ c: C.drone },    '드론 지령 위치'),
   ].join(''));
@@ -1102,6 +1179,7 @@ function buildLegend() {
 // 드론 제어
 // ─────────────────────────────────────────────
 let droneMode = 'dry';       // dry | real
+let droneKind = 'manual';    // manual(지점별 이동) | auto(자동 순회)
 let droneStatus = null, mission = null, missionErr = null;
 let armTimer = null, armLeft = 0;
 
@@ -1168,7 +1246,13 @@ async function droneLand() {
 // 이륙을 막는 첫 번째 사유. 무언의 비활성 버튼은 만들지 않는다.
 function startBlocker() {
   if (!droneStatus || !droneStatus.connected) return '연결 필요';
-  if (droneStatus.running) return '미션 실행 중';
+  if (droneStatus.running) return '명령 수행 중';
+  if (droneStatus.battery != null && droneStatus.battery < 30)
+    return `배터리 부족 (${droneStatus.battery}% / 최소 30%)`;
+
+  // 수동 모드는 이륙만 하면 되므로 미션 유효성까지 볼 필요가 없다
+  if (droneKind === 'manual') return null;
+
   if (missionErr) return missionErr;
   if (!mission || !mission.points || !mission.points.length) return '미션 없음 (waypoint 대기 중)';
   const oob = mission.points.filter(p => !p.in_bounds).map(p => 'WP' + p.rank);
@@ -1199,6 +1283,52 @@ function onStartClick() {
     renderDrone();
   }, 1000);
   renderDrone();
+}
+
+function setKind(kind) {
+  if (droneStatus && (droneStatus.running || droneStatus.airborne)) return;
+  droneKind = kind;
+  document.getElementById('k-manual').classList.toggle('on', kind === 'manual');
+  document.getElementById('k-auto').classList.toggle('on', kind === 'auto');
+  disarm();
+  buildLegend();          // 모드마다 경로 심볼이 다르다
+  renderDrone(); requestRender();
+}
+
+// ── 수동 이동 ──
+// 자동 순회와 달리 이동 후에도 착륙하지 않는다. 지점을 하나씩 보낸다.
+function onTakeoffClick() {
+  if (droneStatus && droneStatus.airborne) return;
+  if (droneMode === 'dry') { doTakeoff(); return; }
+  if (armTimer) { disarm(); doTakeoff(); return; }   // 2번째 클릭 → 이륙
+  armLeft = 3;
+  armTimer = setInterval(() => {
+    armLeft--;
+    if (armLeft <= 0) disarm();
+    renderDrone();
+  }, 1000);
+  renderDrone();
+}
+
+async function doTakeoff() {
+  try { droneStatus = await postJSON('/drone/takeoff'); showError(null); }
+  catch (e) { showError(e.message); }
+  renderDrone(); requestRender();
+}
+
+async function droneGoto(p) {
+  try {
+    droneStatus = await postJSON('/drone/goto',
+      { lon: p.lon, lat: p.lat, speed: speedVal(), label: `WP${p.rank}` });
+    showError(null);
+  } catch (e) { showError(e.message); }
+  renderDrone(); requestRender();
+}
+
+async function droneHome() {
+  try { droneStatus = await postJSON(`/drone/home?speed=${speedVal()}`); showError(null); }
+  catch (e) { showError(e.message); }
+  renderDrone(); requestRender();
 }
 
 async function doStart() {
@@ -1260,16 +1390,27 @@ function renderDrone() {
     re.className = 'badge ' + (RESULT_BADGE[st.result] || 'b-grey');
   } else rr.style.display = 'none';
 
-  // 미션 미리보기
+  // 미션 미리보기. 수동 모드에선 각 지점에 이동 버튼을 붙인다.
   if (mission && mission.points) {
-    setHTML('mission-list', mission.points.map(p => `
+    const canGo = droneKind === 'manual' && st && st.airborne && !st.running;
+    setHTML('mission-list', mission.points.map((p, i) => `
       <div class="mrow">
         <div class="mchip" style="background:${wpColor(p.rank - 1)};color:${C.wpText}">${p.rank}</div>
         <div style="flex:1">${p.prob != null ? p.prob.toFixed(2) + '%' : '-'}
           <span style="color:var(--text-dim)">x${p.tello_x_cm.toFixed(0)} y${p.tello_y_cm.toFixed(0)}</span>
         </div>
-        <div class="${p.in_bounds ? 'ok' : 'bad'}">${p.in_bounds ? '✓' : '✗ 지도 밖'}</div>
+        ${droneKind === 'manual'
+          ? `<button class="btn" data-go="${i}" ${canGo && p.in_bounds ? '' : 'disabled'}
+                     style="width:auto;padding:2px 9px;font-size:11px">이동</button>`
+          : `<div class="${p.in_bounds ? 'ok' : 'bad'}">${p.in_bounds ? '✓' : '✗ 지도 밖'}</div>`}
       </div>`).join(''));
+
+    // innerHTML 로 매번 새로 만들어지므로 핸들러도 다시 붙인다
+    if (droneKind === 'manual') {
+      document.querySelectorAll('#mission-list button[data-go]').forEach(b => {
+        b.onclick = () => droneGoto(mission.points[+b.dataset.go]);
+      });
+    }
 
     const legs = mission.legs.filter(l => !l.skip);
     const dist = legs.reduce((a, l) => a + l.dist_cm, 0);
@@ -1288,18 +1429,33 @@ function renderDrone() {
     setHTML('mission-meta', ''); setHTML('mission-warn', '');
   }
 
-  // 시작 버튼
+  // 모드별 컨트롤 전환
+  const manual = droneKind === 'manual';
+  document.getElementById('btn-start').style.display  = manual ? 'none' : '';
+  document.getElementById('manual-ctl').style.display = manual ? 'flex' : 'none';
+
   const why = startBlocker();
-  const btn = document.getElementById('btn-start');
-  btn.disabled = !!why;
-  if (armTimer) {
-    btn.textContent = `정말 이륙? (${armLeft})`;
-    btn.className = 'btn arm';
+  const env = droneMode === 'real' ? '실기체' : 'DRY RUN';
+
+  if (manual) {
+    // btn-launch = 수동 이륙 버튼. 툴바의 btn-takeoff(이륙 지점 지정)와 다른 것이다.
+    const tk = document.getElementById('btn-launch');
+    const airborne = !!(st && st.airborne);
+    tk.disabled = !!why || airborne;
+    if (armTimer)        { tk.textContent = `정말 이륙? (${armLeft})`; tk.className = 'btn arm'; }
+    else if (airborne)   { tk.textContent = '비행 중';                 tk.className = 'btn'; }
+    else                 { tk.textContent = `이륙 (${env})`;           tk.className = 'btn go'; }
+    document.getElementById('btn-home').disabled = !airborne || !!(st && st.running);
+    // 유휴 자동착륙 카운트다운
+    setText('start-why',
+      airborne && st.idle_left != null ? `${st.idle_left}초 후 자동 착륙` : (why || ''));
   } else {
-    btn.textContent = droneMode === 'real' ? '미션 시작 (실기체)' : '미션 시작 (DRY RUN)';
-    btn.className = 'btn go';
+    const btn = document.getElementById('btn-start');
+    btn.disabled = !!why;
+    if (armTimer) { btn.textContent = `정말 이륙? (${armLeft})`; btn.className = 'btn arm'; }
+    else          { btn.textContent = `미션 시작 (${env})`;      btn.className = 'btn go'; }
+    setText('start-why', why || '');
   }
-  setText('start-why', why || '');
 
   // 이벤트 로그
   const ev = st && st.events && st.events.length ? st.events.join('\n') : '—';
