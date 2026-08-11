@@ -137,13 +137,8 @@ source venv/bin/activate
 # 4. pip 업그레이드
 python -m pip install --upgrade pip
 
-<<<<<<< Updated upstream
-# 4. 패키지 설치
-pip install numpy matplotlib "shapely>=2.0" osmnx geopandas fiona pyproj requests networkx pyqt5 fastapi "uvicorn[standard]" python-dotenv djitellopy
-=======
 # 5. 패키지 설치
 pip install -r requirements.txt
->>>>>>> Stashed changes
 ```
 
 ### Windows (PowerShell)
