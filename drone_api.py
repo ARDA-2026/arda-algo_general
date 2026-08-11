@@ -166,6 +166,12 @@ async def drone_home(speed: int = Query(30, ge=10, le=100)):
         raise HTTPException(409, str(e))
 
 
+@router.post("/drone/path/reset")
+async def drone_path_reset():
+    """화면에 표시되는 지나간 경로만 지운다. 비행에는 영향 없음."""
+    return driver.clear_path()
+
+
 @router.post("/drone/land")
 async def drone_land():
     """즉시 착륙 (비상 정지). 실행 중인 미션은 중단된다."""

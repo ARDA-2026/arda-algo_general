@@ -238,7 +238,9 @@ h2 { font-size: 14px; color: var(--accent); text-align: center; padding-bottom: 
     <!-- 수동 이동 -->
     <div id="manual-ctl" style="margin-top:9px;display:flex;gap:6px">
       <button class="btn go" id="btn-launch" onclick="onTakeoffClick()">이륙</button>
-      <button class="btn"    id="btn-home" style="flex:0 0 38%" onclick="droneHome()">복귀</button>
+      <button class="btn"    id="btn-home"      style="flex:0 0 26%" onclick="droneHome()">복귀</button>
+      <button class="btn"    id="btn-clearpath" style="flex:0 0 26%"
+              onclick="clearDronePath()" title="지도에 남은 경로 표시만 지웁니다">지우기</button>
     </div>
     <div class="why" id="start-why"></div>
 
@@ -1325,6 +1327,12 @@ async function droneGoto(p) {
   renderDrone(); requestRender();
 }
 
+async function clearDronePath() {
+  try { droneStatus = await postJSON('/drone/path/reset'); showError(null); }
+  catch (e) { showError(e.message); }
+  renderDrone(); requestRender();
+}
+
 async function droneHome() {
   try { droneStatus = await postJSON(`/drone/home?speed=${speedVal()}`); showError(null); }
   catch (e) { showError(e.message); }
@@ -1446,6 +1454,8 @@ function renderDrone() {
     else if (airborne)   { tk.textContent = '비행 중';                 tk.className = 'btn'; }
     else                 { tk.textContent = `이륙 (${env})`;           tk.className = 'btn go'; }
     document.getElementById('btn-home').disabled = !airborne || !!(st && st.running);
+    // 자취 지우기는 표시만 바꾸므로 지울 게 있으면 언제든 가능
+    document.getElementById('btn-clearpath').disabled = !(st && st.path && st.path.length > 1);
     // 유휴 자동착륙 카운트다운
     setText('start-why',
       airborne && st.idle_left != null ? `${st.idle_left}초 후 자동 착륙` : (why || ''));

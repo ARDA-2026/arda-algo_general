@@ -95,6 +95,15 @@ class TelloDriver:
         self.path.append((round(self.cur_x, 1), round(self.cur_y, 1)))
         del self.path[:-60]
 
+    def clear_path(self):
+        """자취만 지운다. 비행 상태나 지령 위치는 건드리지 않는다.
+
+        현재 위치를 새 시작점으로 삼아야 다음 이동이 허공에서 이어지지 않는다.
+        """
+        self.path = [(round(self.cur_x, 1), round(self.cur_y, 1))]
+        self._ev("자취 지움")
+        return self.status()
+
     # ── 연결 ────────────────────────────────────────────────
     def connect(self, dry_run=True):
         if self._busy():
