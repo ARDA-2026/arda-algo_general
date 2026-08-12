@@ -90,6 +90,10 @@ river_geojson = json.loads(hangang_mapo.geometry.to_json())
 N = 200
 MAPO_LAT = 37.540
 MAPO_LON = 126.907
+# POST /reset이 되돌아갈 기본 입수 지점 — MAPO_LON/LAT은 낙하 확정이 올
+# 때마다 그 지점으로 덮어써지므로, 원래 기본값을 따로 보존해둔다.
+DEFAULT_MAPO_LON = MAPO_LON
+DEFAULT_MAPO_LAT = MAPO_LAT
 
 RADIUS_DEG = 10 / 111000
 np.random.seed(42)
@@ -220,8 +224,8 @@ _rebuild_map()
 HIST_HALF_LIFE_SEC = 20.0    # 이 시간이 지나면 과거 기여도가 절반
 HIST_DECAY = 0.5 ** ((DT * SPEED) / HIST_HALF_LIFE_SEC)
 
-best_trail_lons  = [MAPO_LON]
-best_trail_lats  = [MAPO_LAT]
+best_trail_lons  = []
+best_trail_lats  = []
 stranded_lons    = []
 stranded_lats    = []
 observation      = None
@@ -262,11 +266,55 @@ in_river_prev = in_river.copy()
 # ─────────────────────────────────────────
 sim_lock  = threading.Lock()
 sim_state: dict = {}
-new_observation = None   # POST /observation 에서 설정
-new_fall_entry  = None   # POST /fall-detected 에서 설정 — 입수 지점을 옮기고 시뮬레이션을 처음부터 재시작
+new_observation = None   # POST /observation 또는 POST /report(낙하 확정 신호)에서 설정
+new_reset       = None   # POST /reset 에서 설정 — 대기 상태로 되돌림
+# 낙하 판정(POST /report의 확정 신호, 또는 대기 중 온 POST /observation)이
+# 오기 전까지는 True가 되지 않는다 — False인 동안 simulation_step()은
+# 파티클을 전혀 움직이지 않고 대기만 한다(젯슨이 아직 아무것도 안 보내도
+# 파티클이 저절로 퍼지는 걸 막기 위함). POST /reset으로 다시 False로
+# 되돌릴 수 있다.
+sim_started = False
+
+
+def _reset_to_origin(entry_lon: float, entry_lat: float) -> None:
+    """입수 지점을 entry_lon/entry_lat으로 옮기고 파티클·지도·누적 이력을
+    전부 초기화한다. 대기 상태에서 첫 낙하 판정이 왔을 때(POST /report,
+    /observation)와 POST /reset(기본 지점으로) 둘 다 이 함수를 쓴다 —
+    sim_started를 True/False 어느 쪽으로 할지는 호출부가 정한다."""
+    global particles_lon, particles_lat, pvlon, pvlat, in_river_prev
+    global elapsed_sec, best_trail_lons, best_trail_lats
+    global stranded_lons, stranded_lats, observation, obs_history
+    global new_observation, _step, last_printed_time
+    global MAPO_LON, MAPO_LAT
+
+    MAPO_LON, MAPO_LAT = entry_lon, entry_lat
+
+    angles = np.random.uniform(0, 2 * np.pi, N)
+    radii  = np.random.uniform(0, RADIUS_DEG, N)
+    particles_lon[:] = entry_lon + radii * np.cos(angles)
+    particles_lat[:] = entry_lat + radii * np.sin(angles)
+    pvlon[:] = velocity_x / 88000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 88000,  N)
+    pvlat[:] = velocity_y / 111000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 111000, N)
+
+    # 지도 원점이 바뀌었으니 격자·누적 히트맵·(기본값이면) 이륙 지점을
+    # 새 원점 기준으로 다시 계산한다.
+    _rebuild_map()
+
+    elapsed_sec = 0.0
+    best_trail_lons = []
+    best_trail_lats = []
+    stranded_lons = []
+    stranded_lats = []
+    observation = None
+    obs_history = []
+    new_observation = None  # 리셋과 동시에 대기 중이던 재감지 관측값은 폐기
+    _step = 0
+    last_printed_time = -PRINT_INTERVAL
+    in_river_prev = filter_in_river(particles_lon, particles_lat)
+
 
 # ─────────────────────────────────────────
-# 시뮬레이션 스텝 
+# 시뮬레이션 스텝
 # ─────────────────────────────────────────
 def simulation_step():
     global particles_lon, particles_lat, in_river, in_river_prev
@@ -278,42 +326,17 @@ def simulation_step():
     global _step, last_printed_time
     global takeoff_lon, takeoff_lat, new_takeoff
     global new_map_cfg, takeoff_is_default
-    global new_fall_entry, MAPO_LON, MAPO_LAT
+    global new_reset, sim_started, MAPO_LON, MAPO_LAT
 
-    # 새 입수 지점 적용 (arda-bringup 레이더+열화상 최초 확정 → POST /fall-detected).
-    # 다른 갱신(지도 설정/이륙 지점/관측값)보다 먼저 처리한다 — 입수 지점이
-    # 바뀌면 지도 원점(MAPO_LON/LAT)부터 새로 잡아야, 그 위에서 계산되는
-    # 격자·기본 이륙 지점(_rebuild_map)이 새 지점 기준으로 나온다. 엔드포인트
-    # 쪽에서 비행 중에는 이미 막고 들어오므로(POST /map, /takeoff와 같은 원칙)
-    # 여기서 다시 확인하지는 않는다.
-    if new_fall_entry is not None:
-        entry_lon, entry_lat = new_fall_entry
-        new_fall_entry = None
-        MAPO_LON, MAPO_LAT = entry_lon, entry_lat
-
-        angles = np.random.uniform(0, 2 * np.pi, N)
-        radii  = np.random.uniform(0, RADIUS_DEG, N)
-        particles_lon[:] = entry_lon + radii * np.cos(angles)
-        particles_lat[:] = entry_lat + radii * np.sin(angles)
-        pvlon[:] = velocity_x / 88000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 88000,  N)
-        pvlat[:] = velocity_y / 111000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 111000, N)
-
-        # 지도 원점이 바뀌었으니 격자·누적 히트맵·(기본값이면) 이륙 지점을
-        # 새 원점 기준으로 다시 계산한다.
-        _rebuild_map()
-
-        elapsed_sec = 0.0
-        best_trail_lons = [entry_lon]
-        best_trail_lats = [entry_lat]
-        stranded_lons = []
-        stranded_lats = []
-        observation = None
-        obs_history = []
-        new_observation = None  # 리셋과 동시에 대기 중이던 재감지 관측값은 폐기
-        _step = 0
-        last_printed_time = -PRINT_INTERVAL
-        in_river_prev = filter_in_river(particles_lon, particles_lat)
-        log(f"[FALL] 새 입수 지점 수신 — 시뮬레이션 재시작: lat={entry_lat:.6f} lon={entry_lon:.6f}")
+    # 대기 상태로 리셋 (툴바 리셋 버튼 → POST /reset). 기본 입수 지점으로
+    # 되돌리고 sim_started를 다시 False로 내려서, 다음 낙하 판정(POST /report
+    # 의 확정 신호, 또는 대기 중 온 POST /observation)이 올 때까지 파티클을
+    # 멈춘다.
+    if new_reset:
+        new_reset = None
+        _reset_to_origin(DEFAULT_MAPO_LON, DEFAULT_MAPO_LAT)
+        sim_started = False
+        log("[RESET] 대기 상태로 복귀 — 다음 낙하 판정을 기다립니다")
 
     # 지도 설정 변경 (POST /map). 격자가 통째로 바뀌므로 시뮬 스레드에서 적용한다.
     if new_map_cfg is not None:
@@ -329,21 +352,82 @@ def simulation_step():
         new_takeoff = None
         takeoff_is_default = False
 
-    # 새 관측값 적용 (마우스 클릭 → POST /observation)
+    # 새 관측값 적용 — 브라우저 클릭(POST /observation) 또는 arda-bringup의
+    # 낙하 확정/재감지(POST /report)가 여기로 들어온다. 아직 대기 상태
+    # (sim_started=False)에서 처음 오는 값은 입수 지점으로 삼아 시뮬레이션을
+    # 처음부터 시작하고(지도 원점·격자·누적 이력까지 리셋), 이미 시작된
+    # 뒤에는 파티클만 그 지점으로 재수렴시킨다(이력 유지) — drift_node의
+    # "첫 관측값을 낙하 지점으로 삼는다" 원칙과 동일.
     if new_observation is not None:
         obs_lon, obs_lat = new_observation
-        new_observation  = None
-        observation = (obs_lon, obs_lat)
-        obs_history.append((obs_lon, obs_lat))
+        new_observation = None
 
-        RADIUS_OBS = 5 / 111000
-        a = np.random.uniform(0, 2 * np.pi, N)
-        r = np.random.uniform(0, RADIUS_OBS, N)
-        particles_lon[:] = obs_lon + r * np.cos(a)
-        particles_lat[:] = obs_lat + r * np.sin(a)
-        pvlon[:] = velocity_x / 88000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 88000,  N)
-        pvlat[:] = velocity_y / 111000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 111000, N)
-        accumulated_hist[:] = 0
+        if not sim_started:
+            _reset_to_origin(obs_lon, obs_lat)
+            sim_started = True
+            log(f"[START] 낙하 판정 수신 — 시뮬레이션 시작: lat={obs_lat:.6f} lon={obs_lon:.6f}")
+        else:
+            observation = (obs_lon, obs_lat)
+            obs_history.append((obs_lon, obs_lat))
+
+            RADIUS_OBS = 5 / 111000
+            a = np.random.uniform(0, 2 * np.pi, N)
+            r = np.random.uniform(0, RADIUS_OBS, N)
+            particles_lon[:] = obs_lon + r * np.cos(a)
+            particles_lat[:] = obs_lat + r * np.sin(a)
+            pvlon[:] = velocity_x / 88000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 88000,  N)
+            pvlat[:] = velocity_y / 111000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 111000, N)
+            accumulated_hist[:] = 0
+
+    if not sim_started:
+        # 대기 상태 — 파티클을 전혀 움직이지 않고 빈 상태만 내보낸다.
+        # thermal_image_* 는 여기서 건드리지 않는다 — /report로 오는 열화상
+        # 스트리밍은 sim_started와 무관하게 항상 최신 이미지를 보여줘야 한다.
+        with sim_lock:
+            sim_state.update({
+                "sim_started":     False,
+                "elapsed_sec":     0.0,
+                "particles_lon":   [],
+                "particles_lat":   [],
+                "heatmap":         [],
+                "heatmap_extent":  [lon_min, lon_max, lat_min, lat_max],
+                "best_lon":        None,
+                "best_lat":        None,
+                "best_trail_lons": [],
+                "best_trail_lats": [],
+                "waypoints":       [],
+                "stranded_lons":   stranded_lons[-800:],
+                "stranded_lats":   stranded_lats[-800:],
+                "stranded_count":  len(stranded_lons),
+                "observation":     list(observation) if observation else None,
+                "obs_history":     obs_history[-50:],
+                "in_river_count":  0,
+                "n_particles":     N,
+                "velocity_x":      float(velocity_x),
+                "turbulence":      TURBULENCE,
+                "entry_lon":       MAPO_LON,
+                "entry_lat":       MAPO_LAT,
+                "bounds": {
+                    "lon_min": lon_min, "lon_max": lon_max,
+                    "lat_min": lat_min, "lat_max": lat_max,
+                },
+                "map": {
+                    "scale":    MAP_SCALE,
+                    "width_m":  MAP_PRINT_W,
+                    "height_m": MAP_PRINT_H,
+                    "real_w_m": MAP_W_M,
+                    "real_h_m": MAP_H_M,
+                    "east_m":   MAP_EAST_M,
+                    "grid_nx":  GRID_NX, "grid_ny": GRID_NY,
+                    "nms_m":    round(NMS_MIN_DIST_M, 1),
+                    "lon_min": map_lon_min, "lon_max": map_lon_max,
+                    "lat_min": map_lat_min, "lat_max": map_lat_max,
+                    "origin_lon": MAPO_LON, "origin_lat": MAPO_LAT,
+                    "takeoff_lon": float(takeoff_lon),
+                    "takeoff_lat": float(takeoff_lat),
+                },
+            })
+        return
 
     max_vlon = abs(velocity_x) * 2 / 88000
     max_vlat = abs(velocity_x) * 1 / 111000
@@ -421,6 +505,7 @@ def simulation_step():
     # 공유 상태 갱신
     with sim_lock:
         sim_state.update({
+            "sim_started":     True,
             "elapsed_sec":     float(elapsed_sec),
             "particles_lon":   lons_v.tolist(),
             "particles_lat":   lats_v.tolist(),
@@ -498,9 +583,16 @@ class ObservationIn(BaseModel):
     lat: float
 
 
-class FallDetectedIn(BaseModel):
+class ReportIn(BaseModel):
+    """arda-bringup의 기존 send_fall_report() payload 그대로 — 새 필드
+    없음. image_jpeg 없이 부르면 lat/lon/timestamp만, 있으면
+    thermal_image_base64/confirmed도 같이 온다(arda-radar/arda/utils/
+    web_report.py 참고)."""
     lat: float
     lon: float
+    timestamp: str | None = None
+    thermal_image_base64: str | None = None
+    confirmed: bool = False
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -532,21 +624,48 @@ async def post_observation(obs: ObservationIn):
     return {"ok": True}
 
 
-@app.post("/fall-detected")
-async def post_fall_detected(fall: FallDetectedIn):
-    """레이더+열화상이 익수를 최초로 확정한 순간 arda-bringup이 호출한다
-    (arda.utils.send_fall_entry 참고). 이 지점을 새 입수 지점(지도 원점)으로
-    삼아 시뮬레이션을 처음부터 다시 시작한다 — 재감지 시의 POST /observation과
-    달리 지도 원점·격자·누적 히트맵·궤적까지 전부 리셋된다.
+@app.post("/report")
+async def post_report(r: ReportIn):
+    """arda-bringup이 이미 쓰던 report_url 메커니즘(arda.utils.send_fall_report)
+    이 그대로 호출하는 엔드포인트 — 별도 브릿지 함수 없이 기존 payload를
+    그대로 받는다.
 
-    /map, /takeoff와 같은 이유로 비행 중에는 거부한다 — 지도 원점이 바뀌면
-    드론의 지령 위치 누적이 통째로 어긋난다.
+    - thermal_image_base64가 없는 호출(radar_worker.py가 열화상 확정
+      순간 1회 보내는 것)이거나 confirmed=True인 호출(thermal_worker.py가
+      확정 프레임에 함께 보내는 것)은 "낙하 판정" 이벤트로 취급해 POST
+      /observation과 똑같이 처리한다 — 대기 중이면 그 지점에서 시뮬레이션을
+      시작하고, 이미 시작됐으면 파티클만 재수렴시킨다.
+    - thermal_image_base64가 있는 모든 호출(관찰/대기 중 상시 스트리밍
+      프레임 포함, confirmed 여부 무관)은 최신 열화상 이미지로 저장해
+      시각화에 쓴다 — sim_started·파티클과 무관하게 항상 갱신된다.
     """
-    global new_fall_entry
+    global new_observation
+
+    if r.thermal_image_base64 is not None:
+        with sim_lock:
+            sim_state["thermal_image_base64"] = r.thermal_image_base64
+            sim_state["thermal_image_confirmed"] = r.confirmed
+            sim_state["thermal_image_ts"] = r.timestamp
+
+    if r.thermal_image_base64 is None or r.confirmed:
+        new_observation = (r.lon, r.lat)
+
+    return {"ok": True}
+
+
+@app.post("/reset")
+async def post_reset():
+    """시뮬레이션을 대기 상태로 되돌린다 — 기본 입수 지점으로 복원하고
+    파티클을 멈춘 뒤, 다음 낙하 판정(POST /report 또는 대기 중 /observation)
+    까지 아무것도 계산하지 않는다.
+
+    /map, /takeoff와 같은 이유로 비행 중에는 거부한다.
+    """
+    global new_reset
     if drone_api.driver.status()["running"]:
-        raise HTTPException(409, "비행 중에는 입수 지점을 바꿀 수 없습니다")
-    new_fall_entry = (fall.lon, fall.lat)
-    return {"ok": True, "lat": fall.lat, "lon": fall.lon}
+        raise HTTPException(409, "비행 중에는 리셋할 수 없습니다")
+    new_reset = True
+    return {"ok": True}
 
 
 @app.post("/takeoff")

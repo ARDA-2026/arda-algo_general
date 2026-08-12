@@ -263,8 +263,9 @@ velocity_x, velocity_y = get_velocity()  # ← 이 줄 주석 해제
 | `GET` | `/` | 브라우저 시각화 페이지 |
 | `GET` | `/state` | 현재 시뮬레이션 상태 (JSON) |
 | `GET` | `/river-geojson` | 한강 폴리곤 GeoJSON |
-| `POST` | `/observation` | 관측값(재감지) 입력 `{"lon": ..., "lat": ...}` — 파티클만 재수렴, 이력 유지 |
-| `POST` | `/fall-detected` | 입수 지점(최초 확정) 입력 `{"lat": ..., "lon": ...}` — 지도 원점 재설정 + 시뮬레이션 처음부터 재시작. 비행 중엔 `409` |
+| `POST` | `/observation` | 관측값(브라우저 클릭) 입력 `{"lon": ..., "lat": ...}` — 대기 중이면 그 지점에서 시작, 이미 시작됐으면 파티클만 재수렴 |
+| `POST` | `/report` | arda-bringup의 기존 `report_url`(`send_fall_report()`)이 그대로 호출. `{"lat","lon","timestamp"?,"thermal_image_base64"?,"confirmed"?}` — 이미지 없는 호출/`confirmed=true`는 `/observation`과 동일하게 처리(대기 중이면 시작, 아니면 재수렴), 이미지가 있으면 항상 최신 열화상으로 저장해 시각화 |
+| `POST` | `/reset` | 시뮬레이션을 대기 상태로 되돌림(기본 입수 지점 복원, 파티클 정지) — 다음 낙하 판정까지 계산 안 함. 비행 중엔 `409` |
 | `WS` | `/ws` | WebSocket 실시간 상태 스트림 |
 | `POST` | `/takeoff` | 드론 이륙 지점 지정 `{"lon": ..., "lat": ...}` |
 | `POST` | `/takeoff/reset` | 이륙 지점을 기본 위치로 복원 |
@@ -476,15 +477,18 @@ def publish_waypoints(pub):
 | 항목 | 현재 | 실제 연동 시 |
 |------|------|-------------|
 | 유속 | HRFCO API 자동 수신 (실패 시 고정값) | HRFCO API 안정적 수신 |
-| 입수 지점 | **완료** — arda-bringup(레이더+열화상 최초 확정)이 `POST /fall-detected` 자동 전송 | (완료) |
-| 관측값 | 브라우저 캔버스 클릭 **또는** arda-bringup 재감지 자동 전송, 둘 다 `POST /observation`으로 동일하게 처리 | (완료) |
+| 입수 지점/재감지 | **완료** — arda-bringup(레이더+열화상 확정)이 기존 `report_url` 메커니즘으로 `POST /report` 자동 전송(대기 중이면 시작, 아니면 재수렴) | (완료) |
+| 열화상 화면 | **완료** — 같은 `POST /report`에 실려 오는 `thermal_image_base64`를 패널에 표시 | (완료) |
+| 관측값(수동) | 브라우저 캔버스 클릭 → `POST /observation` — `/report`와 동일한 파티클 반영 로직 공유 | (완료) |
 | Waypoint 출력 | 브라우저 패널 + 콘솔 출력 | ROS2 PoseArray 토픽 발행 |
 | 좌표 변환 | 없음 | OpenCV Homography |
 
-> `/fall-detected`/`/observation` 호출 쪽 코드는 `arda-radar/arda/utils/web_report.py`의
-> `send_fall_entry()`/`send_drift_observation()`, 그리고 `radar_worker.py`(arda-raset,
-> arda-bringup 양쪽)의 열화상 확정 처리 부분 참고. `site.algo_general_url`
-> (`arda-radar/config/settings.yaml`)에 이 서버 주소를 채워야 활성화된다.
+> `POST /report`를 호출하는 쪽은 새 브릿지 함수가 아니라 **원래 있던**
+> `arda-radar/arda/utils/web_report.py`의 `send_fall_report()`다 —
+> `radar_worker.py`(열화상 확정 시 1회, 이미지 없음)와 `thermal_worker.py`
+> (관찰/대기 중 상시, 이미지 포함)가 이미 부르고 있던 그대로다.
+> `site.report_url`(`arda-radar/config/settings.yaml`)을 이 서버의
+> `http://<host>:8000/report`로 맞춰두면 활성화된다.
 
 ---
 

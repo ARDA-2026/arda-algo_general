@@ -186,6 +186,14 @@ h2 { font-size: 14px; color: var(--accent); text-align: center; padding-bottom: 
   <h2>Han River Drift</h2>
   <div id="conn" class="disconnected">● 연결 중...</div>
 
+  <!-- ── 열화상 (arda-bringup이 report_url로 스트리밍) ── -->
+  <div class="card" id="thermal-card">
+    <h3>열화상</h3>
+    <img id="thermal-img" style="width:100%;border-radius:6px;display:none">
+    <div id="thermal-empty" style="font-size:12px;color:var(--text-dim)">수신 대기 중</div>
+    <div id="thermal-meta" style="font-size:11px;margin-top:4px;color:var(--text-dim)"></div>
+  </div>
+
   <!-- ── 드론 ── -->
   <div class="card" id="drone-card">
     <h3>드론 수색</h3>
@@ -1531,6 +1539,31 @@ fetch('/river-geojson')
   .then(g => { riverGeojson = g; requestRender(); })
   .catch(e => console.warn('강 폴리곤 로드 실패', e));
 
+let _lastThermalTs = null;
+function updateThermalCard(d) {
+  // POST /report로 온 열화상 이미지(sim_started/파티클과 무관하게 항상
+  // 최신값). thermal_image_ts가 안 바뀌었으면(=새 프레임 아님) img.src를
+  // 다시 안 찍어서 깜빡임을 줄인다.
+  const img = document.getElementById('thermal-img');
+  const empty = document.getElementById('thermal-empty');
+  const meta = document.getElementById('thermal-meta');
+  if (!d.thermal_image_base64) {
+    img.style.display = 'none';
+    empty.style.display = 'block';
+    meta.textContent = '';
+    return;
+  }
+  if (d.thermal_image_ts !== _lastThermalTs) {
+    _lastThermalTs = d.thermal_image_ts;
+    img.src = 'data:image/jpeg;base64,' + d.thermal_image_base64;
+  }
+  img.style.display = 'block';
+  empty.style.display = 'none';
+  meta.textContent = d.thermal_image_confirmed
+    ? `✅ 확정됨${d.thermal_image_ts ? ' — ' + d.thermal_image_ts : ''}`
+    : (d.thermal_image_ts || '');
+}
+
 function connect() {
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
   const el = document.getElementById('conn');
@@ -1545,6 +1578,7 @@ function connect() {
     try { d = JSON.parse(e.data); } catch (_) { return; }
     if (!d || d.elapsed_sec === undefined) return;   // 첫 프레임은 {} 일 수 있다
     state = d;
+    updateThermalCard(d);
     updateScale(d);                                  // 스케일은 수신 시에만 갱신
     if (!boundsAdopted && d.bounds) {
       // 서버는 lon_min 형식, 뷰는 lonMin 형식 — 키를 옮겨 담아야 한다
