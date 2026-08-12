@@ -186,6 +186,14 @@ h2 { font-size: 14px; color: var(--accent); text-align: center; padding-bottom: 
   <h2>Han River Drift</h2>
   <div id="conn" class="disconnected">● 연결 중...</div>
 
+  <!-- ── 시뮬레이션 상태 / 리셋 (POST /reset) ── -->
+  <div class="card" id="sim-card">
+    <h3>시뮬레이션</h3>
+    <div id="sim-status" style="font-size:13px;margin-bottom:6px">대기 중 — 낙하 판정을 기다립니다</div>
+    <button class="btn" onclick="resetSimulation()" title="기본 입수 지점으로 복원하고 대기 상태로 되돌림">🔄 대기 상태로 리셋</button>
+    <div id="sim-error" class="err" style="display:none"></div>
+  </div>
+
   <!-- ── 열화상 (arda-bringup이 report_url로 스트리밍) ── -->
   <div class="card" id="thermal-card">
     <h3>열화상</h3>
@@ -1539,6 +1547,25 @@ fetch('/river-geojson')
   .then(g => { riverGeojson = g; requestRender(); })
   .catch(e => console.warn('강 폴리곤 로드 실패', e));
 
+function updateSimCard(d) {
+  const status = document.getElementById('sim-status');
+  status.textContent = d.sim_started
+    ? `진행 중 — 경과 ${Math.floor(d.elapsed_sec / 60)}분 ${Math.floor(d.elapsed_sec % 60)}초`
+    : '대기 중 — 낙하 판정을 기다립니다';
+}
+
+async function resetSimulation() {
+  if (!confirm('시뮬레이션을 대기 상태로 되돌릴까요? 현재 파티클/히트맵/궤적이 모두 초기화됩니다.')) return;
+  const errEl = document.getElementById('sim-error');
+  try {
+    await postJSON('/reset');
+    errEl.style.display = 'none';
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.style.display = '';
+  }
+}
+
 let _lastThermalTs = null;
 function updateThermalCard(d) {
   // POST /report로 온 열화상 이미지(sim_started/파티클과 무관하게 항상
@@ -1578,6 +1605,7 @@ function connect() {
     try { d = JSON.parse(e.data); } catch (_) { return; }
     if (!d || d.elapsed_sec === undefined) return;   // 첫 프레임은 {} 일 수 있다
     state = d;
+    updateSimCard(d);
     updateThermalCard(d);
     updateScale(d);                                  // 스케일은 수신 시에만 갱신
     if (!boundsAdopted && d.bounds) {
