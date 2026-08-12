@@ -264,8 +264,7 @@ velocity_x, velocity_y = get_velocity()  # ← 이 줄 주석 해제
 | `GET` | `/state` | 현재 시뮬레이션 상태 (JSON) |
 | `GET` | `/river-geojson` | 한강 폴리곤 GeoJSON |
 | `POST` | `/observation` | 관측값(재감지) 입력 `{"lon": ..., "lat": ...}` — 파티클만 재수렴, 이력 유지 |
-| `POST` | `/fall-detected` | 입수 지점(최초 확정) 입력 `{"lat": ..., "lon": ...}` — 지도 원점 재설정 + 시뮬레이션 처음부터 시작. 비행 중엔 `409` |
-| `POST` | `/reset` | 시뮬레이션을 대기 상태로 되돌림(기본 입수 지점 복원, 파티클 정지) — 다음 `/fall-detected`(또는 대기 중 `/observation`)까지 계산 안 함. 비행 중엔 `409` |
+| `POST` | `/fall-detected` | 입수 지점(최초 확정) 입력 `{"lat": ..., "lon": ...}` — 지도 원점 재설정 + 시뮬레이션 처음부터 재시작. 비행 중엔 `409` |
 | `WS` | `/ws` | WebSocket 실시간 상태 스트림 |
 | `POST` | `/takeoff` | 드론 이륙 지점 지정 `{"lon": ..., "lat": ...}` |
 | `POST` | `/takeoff/reset` | 이륙 지점을 기본 위치로 복원 |
