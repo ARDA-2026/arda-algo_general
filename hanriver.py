@@ -90,6 +90,10 @@ river_geojson = json.loads(hangang_mapo.geometry.to_json())
 N = 200
 MAPO_LAT = 37.540
 MAPO_LON = 126.907
+# POST /reset이 되돌아갈 기본 입수 지점 — MAPO_LON/LAT은 /fall-detected가
+# 올 때마다 그 지점으로 덮어써지므로, 원래 기본값을 따로 보존해둔다.
+DEFAULT_MAPO_LON = MAPO_LON
+DEFAULT_MAPO_LAT = MAPO_LAT
 
 RADIUS_DEG = 10 / 111000
 np.random.seed(42)
@@ -220,8 +224,8 @@ _rebuild_map()
 HIST_HALF_LIFE_SEC = 20.0    # 이 시간이 지나면 과거 기여도가 절반
 HIST_DECAY = 0.5 ** ((DT * SPEED) / HIST_HALF_LIFE_SEC)
 
-best_trail_lons  = [MAPO_LON]
-best_trail_lats  = [MAPO_LAT]
+best_trail_lons  = []
+best_trail_lats  = []
 stranded_lons    = []
 stranded_lats    = []
 observation      = None
@@ -264,9 +268,53 @@ sim_lock  = threading.Lock()
 sim_state: dict = {}
 new_observation = None   # POST /observation 에서 설정
 new_fall_entry  = None   # POST /fall-detected 에서 설정 — 입수 지점을 옮기고 시뮬레이션을 처음부터 재시작
+new_reset       = None   # POST /reset 에서 설정 — 대기 상태로 되돌림
+# 낙하 판정(POST /fall-detected, 또는 대기 중 온 POST /observation)이 오기
+# 전까지는 True가 되지 않는다 — False인 동안 simulation_step()은 파티클을
+# 전혀 움직이지 않고 대기만 한다(젯슨이 아직 아무것도 안 보내도 파티클이
+# 저절로 퍼지는 걸 막기 위함). POST /reset으로 다시 False로 되돌릴 수 있다.
+sim_started = False
+
+
+def _reset_to_origin(entry_lon: float, entry_lat: float) -> None:
+    """입수 지점을 entry_lon/entry_lat으로 옮기고 파티클·지도·누적 이력을
+    전부 초기화한다. POST /fall-detected와 POST /reset(기본 지점으로) 둘
+    다 이 함수를 쓴다 — sim_started를 True/False 어느 쪽으로 할지는
+    호출부가 정한다."""
+    global particles_lon, particles_lat, pvlon, pvlat, in_river_prev
+    global elapsed_sec, best_trail_lons, best_trail_lats
+    global stranded_lons, stranded_lats, observation, obs_history
+    global new_observation, _step, last_printed_time
+    global MAPO_LON, MAPO_LAT
+
+    MAPO_LON, MAPO_LAT = entry_lon, entry_lat
+
+    angles = np.random.uniform(0, 2 * np.pi, N)
+    radii  = np.random.uniform(0, RADIUS_DEG, N)
+    particles_lon[:] = entry_lon + radii * np.cos(angles)
+    particles_lat[:] = entry_lat + radii * np.sin(angles)
+    pvlon[:] = velocity_x / 88000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 88000,  N)
+    pvlat[:] = velocity_y / 111000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 111000, N)
+
+    # 지도 원점이 바뀌었으니 격자·누적 히트맵·(기본값이면) 이륙 지점을
+    # 새 원점 기준으로 다시 계산한다.
+    _rebuild_map()
+
+    elapsed_sec = 0.0
+    best_trail_lons = []
+    best_trail_lats = []
+    stranded_lons = []
+    stranded_lats = []
+    observation = None
+    obs_history = []
+    new_observation = None  # 리셋과 동시에 대기 중이던 재감지 관측값은 폐기
+    _step = 0
+    last_printed_time = -PRINT_INTERVAL
+    in_river_prev = filter_in_river(particles_lon, particles_lat)
+
 
 # ─────────────────────────────────────────
-# 시뮬레이션 스텝 
+# 시뮬레이션 스텝
 # ─────────────────────────────────────────
 def simulation_step():
     global particles_lon, particles_lat, in_river, in_river_prev
@@ -278,7 +326,16 @@ def simulation_step():
     global _step, last_printed_time
     global takeoff_lon, takeoff_lat, new_takeoff
     global new_map_cfg, takeoff_is_default
-    global new_fall_entry, MAPO_LON, MAPO_LAT
+    global new_fall_entry, new_reset, sim_started, MAPO_LON, MAPO_LAT
+
+    # 대기 상태로 리셋 (툴바 리셋 버튼 → POST /reset). 기본 입수 지점으로
+    # 되돌리고 sim_started를 다시 False로 내려서, 다음 /fall-detected(또는
+    # 대기 중 온 /observation)가 올 때까지 파티클을 멈춘다.
+    if new_reset:
+        new_reset = None
+        _reset_to_origin(DEFAULT_MAPO_LON, DEFAULT_MAPO_LAT)
+        sim_started = False
+        log("[RESET] 대기 상태로 복귀 — 다음 낙하 판정을 기다립니다")
 
     # 새 입수 지점 적용 (arda-bringup 레이더+열화상 최초 확정 → POST /fall-detected).
     # 다른 갱신(지도 설정/이륙 지점/관측값)보다 먼저 처리한다 — 입수 지점이
@@ -289,31 +346,9 @@ def simulation_step():
     if new_fall_entry is not None:
         entry_lon, entry_lat = new_fall_entry
         new_fall_entry = None
-        MAPO_LON, MAPO_LAT = entry_lon, entry_lat
-
-        angles = np.random.uniform(0, 2 * np.pi, N)
-        radii  = np.random.uniform(0, RADIUS_DEG, N)
-        particles_lon[:] = entry_lon + radii * np.cos(angles)
-        particles_lat[:] = entry_lat + radii * np.sin(angles)
-        pvlon[:] = velocity_x / 88000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 88000,  N)
-        pvlat[:] = velocity_y / 111000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 111000, N)
-
-        # 지도 원점이 바뀌었으니 격자·누적 히트맵·(기본값이면) 이륙 지점을
-        # 새 원점 기준으로 다시 계산한다.
-        _rebuild_map()
-
-        elapsed_sec = 0.0
-        best_trail_lons = [entry_lon]
-        best_trail_lats = [entry_lat]
-        stranded_lons = []
-        stranded_lats = []
-        observation = None
-        obs_history = []
-        new_observation = None  # 리셋과 동시에 대기 중이던 재감지 관측값은 폐기
-        _step = 0
-        last_printed_time = -PRINT_INTERVAL
-        in_river_prev = filter_in_river(particles_lon, particles_lat)
-        log(f"[FALL] 새 입수 지점 수신 — 시뮬레이션 재시작: lat={entry_lat:.6f} lon={entry_lon:.6f}")
+        _reset_to_origin(entry_lon, entry_lat)
+        sim_started = True
+        log(f"[FALL] 새 입수 지점 수신 — 시뮬레이션 시작: lat={entry_lat:.6f} lon={entry_lon:.6f}")
 
     # 지도 설정 변경 (POST /map). 격자가 통째로 바뀌므로 시뮬 스레드에서 적용한다.
     if new_map_cfg is not None:
@@ -329,21 +364,79 @@ def simulation_step():
         new_takeoff = None
         takeoff_is_default = False
 
-    # 새 관측값 적용 (마우스 클릭 → POST /observation)
+    # 새 관측값 적용 (마우스 클릭 또는 열화상 재감지 자동 전송 → POST /observation).
+    # 아직 대기 상태(sim_started=False)에서 관측값이 먼저 오면 — 젯슨이
+    # /fall-detected 없이 /observation부터 보낸 경우(예: 리셋 이후 재감지로
+    # 잡힌 경우) — 이걸 입수 지점으로 삼아 처음부터 시작한다. drift_node의
+    # "첫 관측값을 낙하 지점으로 삼는다" 원칙과 동일.
     if new_observation is not None:
         obs_lon, obs_lat = new_observation
-        new_observation  = None
-        observation = (obs_lon, obs_lat)
-        obs_history.append((obs_lon, obs_lat))
+        new_observation = None
 
-        RADIUS_OBS = 5 / 111000
-        a = np.random.uniform(0, 2 * np.pi, N)
-        r = np.random.uniform(0, RADIUS_OBS, N)
-        particles_lon[:] = obs_lon + r * np.cos(a)
-        particles_lat[:] = obs_lat + r * np.sin(a)
-        pvlon[:] = velocity_x / 88000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 88000,  N)
-        pvlat[:] = velocity_y / 111000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 111000, N)
-        accumulated_hist[:] = 0
+        if not sim_started:
+            _reset_to_origin(obs_lon, obs_lat)
+            sim_started = True
+            log(f"[OBS] 대기 중 관측값 수신 — 입수 지점으로 삼아 시뮬레이션 시작: lat={obs_lat:.6f} lon={obs_lon:.6f}")
+        else:
+            observation = (obs_lon, obs_lat)
+            obs_history.append((obs_lon, obs_lat))
+
+            RADIUS_OBS = 5 / 111000
+            a = np.random.uniform(0, 2 * np.pi, N)
+            r = np.random.uniform(0, RADIUS_OBS, N)
+            particles_lon[:] = obs_lon + r * np.cos(a)
+            particles_lat[:] = obs_lat + r * np.sin(a)
+            pvlon[:] = velocity_x / 88000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 88000,  N)
+            pvlat[:] = velocity_y / 111000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 111000, N)
+            accumulated_hist[:] = 0
+
+    if not sim_started:
+        # 대기 상태 — 파티클을 전혀 움직이지 않고 빈 상태만 내보낸다.
+        with sim_lock:
+            sim_state.update({
+                "sim_started":     False,
+                "elapsed_sec":     0.0,
+                "particles_lon":   [],
+                "particles_lat":   [],
+                "heatmap":         [],
+                "heatmap_extent":  [lon_min, lon_max, lat_min, lat_max],
+                "best_lon":        None,
+                "best_lat":        None,
+                "best_trail_lons": [],
+                "best_trail_lats": [],
+                "waypoints":       [],
+                "stranded_lons":   stranded_lons[-800:],
+                "stranded_lats":   stranded_lats[-800:],
+                "stranded_count":  len(stranded_lons),
+                "observation":     list(observation) if observation else None,
+                "obs_history":     obs_history[-50:],
+                "in_river_count":  0,
+                "n_particles":     N,
+                "velocity_x":      float(velocity_x),
+                "turbulence":      TURBULENCE,
+                "entry_lon":       MAPO_LON,
+                "entry_lat":       MAPO_LAT,
+                "bounds": {
+                    "lon_min": lon_min, "lon_max": lon_max,
+                    "lat_min": lat_min, "lat_max": lat_max,
+                },
+                "map": {
+                    "scale":    MAP_SCALE,
+                    "width_m":  MAP_PRINT_W,
+                    "height_m": MAP_PRINT_H,
+                    "real_w_m": MAP_W_M,
+                    "real_h_m": MAP_H_M,
+                    "east_m":   MAP_EAST_M,
+                    "grid_nx":  GRID_NX, "grid_ny": GRID_NY,
+                    "nms_m":    round(NMS_MIN_DIST_M, 1),
+                    "lon_min": map_lon_min, "lon_max": map_lon_max,
+                    "lat_min": map_lat_min, "lat_max": map_lat_max,
+                    "origin_lon": MAPO_LON, "origin_lat": MAPO_LAT,
+                    "takeoff_lon": float(takeoff_lon),
+                    "takeoff_lat": float(takeoff_lat),
+                },
+            })
+        return
 
     max_vlon = abs(velocity_x) * 2 / 88000
     max_vlat = abs(velocity_x) * 1 / 111000
@@ -421,6 +514,7 @@ def simulation_step():
     # 공유 상태 갱신
     with sim_lock:
         sim_state.update({
+            "sim_started":     True,
             "elapsed_sec":     float(elapsed_sec),
             "particles_lon":   lons_v.tolist(),
             "particles_lat":   lats_v.tolist(),
@@ -547,6 +641,21 @@ async def post_fall_detected(fall: FallDetectedIn):
         raise HTTPException(409, "비행 중에는 입수 지점을 바꿀 수 없습니다")
     new_fall_entry = (fall.lon, fall.lat)
     return {"ok": True, "lat": fall.lat, "lon": fall.lon}
+
+
+@app.post("/reset")
+async def post_reset():
+    """시뮬레이션을 대기 상태로 되돌린다 — 파티클이 멈추고 기본 입수
+    지점으로 복귀하며, 다음 POST /fall-detected(또는 대기 중 온
+    POST /observation)가 올 때까지 아무것도 계산하지 않는다.
+
+    /map, /takeoff, /fall-detected와 같은 이유로 비행 중에는 거부한다.
+    """
+    global new_reset
+    if drone_api.driver.status()["running"]:
+        raise HTTPException(409, "비행 중에는 리셋할 수 없습니다")
+    new_reset = True
+    return {"ok": True}
 
 
 @app.post("/takeoff")
