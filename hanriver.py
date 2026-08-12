@@ -263,6 +263,7 @@ in_river_prev = in_river.copy()
 sim_lock  = threading.Lock()
 sim_state: dict = {}
 new_observation = None   # POST /observation 에서 설정
+new_fall_entry  = None   # POST /fall-detected 에서 설정 — 입수 지점을 옮기고 시뮬레이션을 처음부터 재시작
 
 # ─────────────────────────────────────────
 # 시뮬레이션 스텝 
@@ -277,6 +278,42 @@ def simulation_step():
     global _step, last_printed_time
     global takeoff_lon, takeoff_lat, new_takeoff
     global new_map_cfg, takeoff_is_default
+    global new_fall_entry, MAPO_LON, MAPO_LAT
+
+    # 새 입수 지점 적용 (arda-bringup 레이더+열화상 최초 확정 → POST /fall-detected).
+    # 다른 갱신(지도 설정/이륙 지점/관측값)보다 먼저 처리한다 — 입수 지점이
+    # 바뀌면 지도 원점(MAPO_LON/LAT)부터 새로 잡아야, 그 위에서 계산되는
+    # 격자·기본 이륙 지점(_rebuild_map)이 새 지점 기준으로 나온다. 엔드포인트
+    # 쪽에서 비행 중에는 이미 막고 들어오므로(POST /map, /takeoff와 같은 원칙)
+    # 여기서 다시 확인하지는 않는다.
+    if new_fall_entry is not None:
+        entry_lon, entry_lat = new_fall_entry
+        new_fall_entry = None
+        MAPO_LON, MAPO_LAT = entry_lon, entry_lat
+
+        angles = np.random.uniform(0, 2 * np.pi, N)
+        radii  = np.random.uniform(0, RADIUS_DEG, N)
+        particles_lon[:] = entry_lon + radii * np.cos(angles)
+        particles_lat[:] = entry_lat + radii * np.sin(angles)
+        pvlon[:] = velocity_x / 88000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 88000,  N)
+        pvlat[:] = velocity_y / 111000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 111000, N)
+
+        # 지도 원점이 바뀌었으니 격자·누적 히트맵·(기본값이면) 이륙 지점을
+        # 새 원점 기준으로 다시 계산한다.
+        _rebuild_map()
+
+        elapsed_sec = 0.0
+        best_trail_lons = [entry_lon]
+        best_trail_lats = [entry_lat]
+        stranded_lons = []
+        stranded_lats = []
+        observation = None
+        obs_history = []
+        new_observation = None  # 리셋과 동시에 대기 중이던 재감지 관측값은 폐기
+        _step = 0
+        last_printed_time = -PRINT_INTERVAL
+        in_river_prev = filter_in_river(particles_lon, particles_lat)
+        log(f"[FALL] 새 입수 지점 수신 — 시뮬레이션 재시작: lat={entry_lat:.6f} lon={entry_lon:.6f}")
 
     # 지도 설정 변경 (POST /map). 격자가 통째로 바뀌므로 시뮬 스레드에서 적용한다.
     if new_map_cfg is not None:
@@ -461,6 +498,11 @@ class ObservationIn(BaseModel):
     lat: float
 
 
+class FallDetectedIn(BaseModel):
+    lat: float
+    lon: float
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     with open("static/index.html", encoding="utf-8") as f:
@@ -488,6 +530,23 @@ async def post_observation(obs: ObservationIn):
     global new_observation
     new_observation = (obs.lon, obs.lat)
     return {"ok": True}
+
+
+@app.post("/fall-detected")
+async def post_fall_detected(fall: FallDetectedIn):
+    """레이더+열화상이 익수를 최초로 확정한 순간 arda-bringup이 호출한다
+    (arda.utils.send_fall_entry 참고). 이 지점을 새 입수 지점(지도 원점)으로
+    삼아 시뮬레이션을 처음부터 다시 시작한다 — 재감지 시의 POST /observation과
+    달리 지도 원점·격자·누적 히트맵·궤적까지 전부 리셋된다.
+
+    /map, /takeoff와 같은 이유로 비행 중에는 거부한다 — 지도 원점이 바뀌면
+    드론의 지령 위치 누적이 통째로 어긋난다.
+    """
+    global new_fall_entry
+    if drone_api.driver.status()["running"]:
+        raise HTTPException(409, "비행 중에는 입수 지점을 바꿀 수 없습니다")
+    new_fall_entry = (fall.lon, fall.lat)
+    return {"ok": True, "lat": fall.lat, "lon": fall.lon}
 
 
 @app.post("/takeoff")

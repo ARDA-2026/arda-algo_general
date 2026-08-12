@@ -263,7 +263,8 @@ velocity_x, velocity_y = get_velocity()  # ← 이 줄 주석 해제
 | `GET` | `/` | 브라우저 시각화 페이지 |
 | `GET` | `/state` | 현재 시뮬레이션 상태 (JSON) |
 | `GET` | `/river-geojson` | 한강 폴리곤 GeoJSON |
-| `POST` | `/observation` | 관측값 입력 `{"lon": ..., "lat": ...}` |
+| `POST` | `/observation` | 관측값(재감지) 입력 `{"lon": ..., "lat": ...}` — 파티클만 재수렴, 이력 유지 |
+| `POST` | `/fall-detected` | 입수 지점(최초 확정) 입력 `{"lat": ..., "lon": ...}` — 지도 원점 재설정 + 시뮬레이션 처음부터 재시작. 비행 중엔 `409` |
 | `WS` | `/ws` | WebSocket 실시간 상태 스트림 |
 | `POST` | `/takeoff` | 드론 이륙 지점 지정 `{"lon": ..., "lat": ...}` |
 | `POST` | `/takeoff/reset` | 이륙 지점을 기본 위치로 복원 |
@@ -475,10 +476,15 @@ def publish_waypoints(pub):
 | 항목 | 현재 | 실제 연동 시 |
 |------|------|-------------|
 | 유속 | HRFCO API 자동 수신 (실패 시 고정값) | HRFCO API 안정적 수신 |
-| 입수 지점 | 하드코딩 (마포대교) | 열화상 카메라 감지 좌표 |
-| 관측값 | 브라우저 캔버스 클릭 → POST /observation | 열화상 카메라 재감지 좌표 자동 전송 |
+| 입수 지점 | **완료** — arda-bringup(레이더+열화상 최초 확정)이 `POST /fall-detected` 자동 전송 | (완료) |
+| 관측값 | 브라우저 캔버스 클릭 **또는** arda-bringup 재감지 자동 전송, 둘 다 `POST /observation`으로 동일하게 처리 | (완료) |
 | Waypoint 출력 | 브라우저 패널 + 콘솔 출력 | ROS2 PoseArray 토픽 발행 |
 | 좌표 변환 | 없음 | OpenCV Homography |
+
+> `/fall-detected`/`/observation` 호출 쪽 코드는 `arda-radar/arda/utils/web_report.py`의
+> `send_fall_entry()`/`send_drift_observation()`, 그리고 `radar_worker.py`(arda-raset,
+> arda-bringup 양쪽)의 열화상 확정 처리 부분 참고. `site.algo_general_url`
+> (`arda-radar/config/settings.yaml`)에 이 서버 주소를 채워야 활성화된다.
 
 ---
 
