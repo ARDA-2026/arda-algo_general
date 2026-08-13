@@ -584,14 +584,17 @@ class ObservationIn(BaseModel):
 
 
 class ReportIn(BaseModel):
-    """arda-bringup의 기존 send_fall_report() payload 그대로 — 새 필드
-    없음. image_jpeg 없이 부르면 lat/lon/timestamp만, 있으면
-    thermal_image_base64/confirmed도 같이 온다(arda-radar/arda/utils/
-    web_report.py 참고)."""
+    """arda-bringup의 기존 send_fall_report() payload 그대로. image_jpeg
+    없이 부르면 lat/lon/timestamp만, 있으면 thermal_image_base64/confirmed도
+    같이 온다. thermal_image_yolo_base64는 실제 온도 그대로인
+    thermal_image_base64와 별개로, YOLO가 보는 배경-상대 보정 이미지를
+    같이 실어 보낼 때만 채워진다 — 웹에서 재요청 없이 토글로 어느 쪽을
+    볼지 고르기 위함(arda-radar/arda/utils/web_report.py 참고)."""
     lat: float
     lon: float
     timestamp: str | None = None
     thermal_image_base64: str | None = None
+    thermal_image_yolo_base64: str | None = None
     confirmed: bool = False
 
 
@@ -638,12 +641,17 @@ async def post_report(r: ReportIn):
     - thermal_image_base64가 있는 모든 호출(관찰/대기 중 상시 스트리밍
       프레임 포함, confirmed 여부 무관)은 최신 열화상 이미지로 저장해
       시각화에 쓴다 — sim_started·파티클과 무관하게 항상 갱신된다.
+      thermal_image_yolo_base64(YOLO가 보는 배경-상대 보정 이미지)도 같이
+      오면 함께 저장한다 — 실제 온도 이미지와 별개 필드라 웹에서 재요청
+      없이 토글로 어느 쪽을 볼지 고를 수 있다(static/index.html의
+      updateThermalCard 참고).
     """
     global new_observation
 
     if r.thermal_image_base64 is not None:
         with sim_lock:
             sim_state["thermal_image_base64"] = r.thermal_image_base64
+            sim_state["thermal_image_yolo_base64"] = r.thermal_image_yolo_base64
             sim_state["thermal_image_confirmed"] = r.confirmed
             sim_state["thermal_image_ts"] = r.timestamp
 

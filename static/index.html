@@ -579,6 +579,10 @@
           <button id="thermal-zoom" onclick="openThermal()" title="크게 보기"
                   style="display:none">⛶</button>
         </h3>
+        <div class="seg">
+          <button id="t-abs"  class="on" onclick="setThermalView('absolute')">실제 온도</button>
+          <button id="t-yolo"           onclick="setThermalView('yolo')">YOLO 시야</button>
+        </div>
         <img id="thermal-img" onclick="openThermal()"
              style="width:100%;border-radius:6px;display:none;cursor:zoom-in">
         <div id="thermal-empty" style="font-size:12px;color:var(--text-dim)">수신 대기 중</div>
@@ -1962,11 +1966,45 @@
       }
     }
 
+    // thermalView: 'absolute'(실제 온도, 기본) | 'yolo'(YOLO가 보는 배경-상대
+    // 보정 이미지) — 젯슨은 매 프레임 둘 다 같이 보내므로(POST /report의
+    // thermal_image_base64/thermal_image_yolo_base64), 서버에 다시 요청할
+    // 필요 없이 여기서 캐시해둔 둘 중 하나를 바로 바꿔 보여주기만 한다.
+    let thermalView = 'absolute';
+    let _lastThermalAbs = null;
+    let _lastThermalYolo = null;
+    let _lastThermalRenderKey = null;
+
+    function setThermalView(view) {
+      thermalView = view;
+      document.getElementById('t-abs').classList.toggle('on', view === 'absolute');
+      document.getElementById('t-yolo').classList.toggle('on', view === 'yolo');
+      _lastThermalRenderKey = null;  // 캐시된 이미지로 바로 다시 그리게 강제
+      renderThermalImg();
+    }
+
+    function renderThermalImg() {
+      const img = document.getElementById('thermal-img');
+      const b64 = thermalView === 'yolo' ? _lastThermalYolo : _lastThermalAbs;
+      if (!b64) return;
+      const key = thermalView + '|' + _lastThermalTs;
+      if (key === _lastThermalRenderKey) return;
+      _lastThermalRenderKey = key;
+      img.src = 'data:image/jpeg;base64,' + b64;
+      // 확대해서 보는 중이면 큰 쪽도 같이 갱신한다
+      const modal = document.getElementById('thermal-modal');
+      if (modal.classList.contains('on')) {
+        document.getElementById('thermal-big').src = img.src;
+      }
+    }
+
     let _lastThermalTs = null;
     function updateThermalCard(d) {
       // POST /report로 온 열화상 이미지(sim_started/파티클과 무관하게 항상
-      // 최신값). thermal_image_ts가 안 바뀌었으면(=새 프레임 아님) img.src를
-      // 다시 안 찍어서 깜빡임을 줄인다.
+      // 최신값) — 실제 온도(thermal_image_base64)/YOLO 시야
+      // (thermal_image_yolo_base64) 둘 다 캐시해두고, 현재 선택된
+      // thermalView에 맞는 쪽만 그린다(renderThermalImg 참고, 확대 모달
+      // 갱신도 거기서 같이 처리).
       const img = document.getElementById('thermal-img');
       const empty = document.getElementById('thermal-empty');
       const meta = document.getElementById('thermal-meta');
@@ -1978,15 +2016,10 @@
         meta.textContent = '';
         return;
       }
-      if (d.thermal_image_ts !== _lastThermalTs) {
-        _lastThermalTs = d.thermal_image_ts;
-        img.src = 'data:image/jpeg;base64,' + d.thermal_image_base64;
-        // 확대해서 보는 중이면 큰 쪽도 같이 갱신한다
-        const modal = document.getElementById('thermal-modal');
-        if (modal.classList.contains('on')) {
-          document.getElementById('thermal-big').src = img.src;
-        }
-      }
+      _lastThermalTs = d.thermal_image_ts;
+      _lastThermalAbs = d.thermal_image_base64;
+      _lastThermalYolo = d.thermal_image_yolo_base64;
+      renderThermalImg();
       img.style.display = 'block';
       empty.style.display = 'none';
       zoom.style.display = 'block';
