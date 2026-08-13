@@ -194,6 +194,39 @@
       padding: 11px;
     }
 
+    /* 열화상 확대 */
+    #thermal-zoom {
+      background: var(--card2); color: var(--text);
+      border: 1px solid var(--border); border-radius: 5px;
+      padding: 1px 7px; font-size: 12px; line-height: 1.4; cursor: pointer;
+    }
+    #thermal-zoom:hover { border-color: var(--accent); color: var(--accent); }
+
+    #thermal-modal {
+      position: fixed; inset: 0; z-index: 100;
+      background: rgba(0,0,0,0.82);
+      display: none; align-items: center; justify-content: center;
+      flex-direction: column; gap: 10px; padding: 24px;
+    }
+    #thermal-modal.on { display: flex; }
+    #thermal-modal img {
+      max-width: 96vw; max-height: 84vh;
+      border-radius: 8px;
+      /* 열화상은 32x24 저해상도라 부드럽게 늘리면 뭉갠 것처럼 보인다.
+         픽셀을 그대로 키워야 클러스터 경계가 보인다. */
+      image-rendering: pixelated;
+    }
+    #thermal-modal .bar {
+      display: flex; gap: 10px; align-items: center;
+      color: #e8e8e8; font-size: 12px; background: none; height: auto;
+    }
+    #thermal-close {
+      background: rgba(255,255,255,0.12); color: #fff;
+      border: 1px solid rgba(255,255,255,0.35); border-radius: 6px;
+      padding: 4px 12px; font-size: 12px; cursor: pointer;
+    }
+    #thermal-close:hover { background: rgba(255,255,255,0.24); }
+
     .card h3 {
       font-size: 11px;
       text-transform: uppercase;
@@ -541,8 +574,13 @@
 
       <!-- ── 열화상 (arda-bringup이 report_url로 스트리밍) ── -->
       <div class="card" id="thermal-card">
-        <h3>열화상</h3>
-        <img id="thermal-img" style="width:100%;border-radius:6px;display:none">
+        <h3 style="display:flex;align-items:center;justify-content:space-between">
+          <span>열화상</span>
+          <button id="thermal-zoom" onclick="openThermal()" title="크게 보기"
+                  style="display:none">⛶</button>
+        </h3>
+        <img id="thermal-img" onclick="openThermal()"
+             style="width:100%;border-radius:6px;display:none;cursor:zoom-in">
         <div id="thermal-empty" style="font-size:12px;color:var(--text-dim)">수신 대기 중</div>
         <div id="thermal-meta" style="font-size:11px;margin-top:4px;color:var(--text-dim)"></div>
       </div>
@@ -1932,21 +1970,32 @@
       const img = document.getElementById('thermal-img');
       const empty = document.getElementById('thermal-empty');
       const meta = document.getElementById('thermal-meta');
+      const zoom = document.getElementById('thermal-zoom');
       if (!d.thermal_image_base64) {
         img.style.display = 'none';
         empty.style.display = 'block';
+        zoom.style.display = 'none';
         meta.textContent = '';
         return;
       }
       if (d.thermal_image_ts !== _lastThermalTs) {
         _lastThermalTs = d.thermal_image_ts;
         img.src = 'data:image/jpeg;base64,' + d.thermal_image_base64;
+        // 확대해서 보는 중이면 큰 쪽도 같이 갱신한다
+        const modal = document.getElementById('thermal-modal');
+        if (modal.classList.contains('on')) {
+          document.getElementById('thermal-big').src = img.src;
+        }
       }
       img.style.display = 'block';
       empty.style.display = 'none';
+      zoom.style.display = 'block';
       meta.textContent = d.thermal_image_confirmed
         ? `✅ 확정됨${d.thermal_image_ts ? ' — ' + d.thermal_image_ts : ''}`
         : (d.thermal_image_ts || '');
+      if (document.getElementById('thermal-modal').classList.contains('on')) {
+        document.getElementById('thermal-big-meta').textContent = meta.textContent;
+      }
     }
 
     function connect() {
@@ -1984,6 +2033,42 @@
     connect();
     pollStatus();
     pollMission();
+  </script>
+
+  <!-- 열화상 확대 보기 -->
+  <div id="thermal-modal" onclick="closeThermal(event)">
+    <img id="thermal-big" alt="열화상 확대">
+    <div class="bar">
+      <span id="thermal-big-meta"></span>
+      <button id="thermal-close" onclick="closeThermal()">닫기 (Esc)</button>
+    </div>
+  </div>
+
+  <script>
+    // 열화상 확대. 원본 img 의 src 를 그대로 재사용하므로 추가 수신이 없다.
+    function openThermal() {
+      const img = document.getElementById('thermal-img');
+      if (!img.src || img.style.display === 'none') return;   // 아직 수신 전
+      document.getElementById('thermal-big').src = img.src;
+      document.getElementById('thermal-big-meta').textContent =
+        document.getElementById('thermal-meta').textContent;
+      document.getElementById('thermal-modal').classList.add('on');
+    }
+
+    function closeThermal(e) {
+      // 이미지 자체를 클릭한 경우는 닫지 않는다 (확대 상태 유지)
+      if (e && e.target && e.target.id === 'thermal-big') return;
+      document.getElementById('thermal-modal').classList.remove('on');
+    }
+
+    // Esc 로 닫기. 캔버스 단축키보다 먼저 잡아야 비상착륙이 잘못 호출되지 않는다.
+    window.addEventListener('keydown', e => {
+      if (e.key === 'Escape' &&
+          document.getElementById('thermal-modal').classList.contains('on')) {
+        e.stopImmediatePropagation();
+        closeThermal();
+      }
+    }, true);
   </script>
 </body>
 
