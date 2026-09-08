@@ -67,24 +67,22 @@ log(f"[INIT] velocity_x={velocity_x:.4f} m/s")
 # ─────────────────────────────────────────
 # [2] OSM 한강 폴리곤
 # ─────────────────────────────────────────
-# 기본 입수 지점 — 밤섬 남동쪽 대각 150m 지점.
+# 기본 입수 지점.
 #
-# 밤섬은 강을 두 수로로 가른다. 폴리곤에서 직접 잰 섬 범위는
-#     경도 126.9220~126.9345 (1100m), 위도 37.5358~37.5413 (611m)
-# 이고, 그 남동 모서리 (37.5358, 126.9345) 에서 대각으로 150m 떨어뜨렸다.
+# 이 값은 인쇄할 배경 사진(static/mapomap.jpg)에서 실제 다리가 지나는
+# 픽셀에 입수 지점 별표가 얹히도록 역산한 것이다 — MAP_EAST_M /
+# MAP_SOUTH_M 주석 참고. 사진을 바꾸면 셋을 같이 다시 잡아야 한다.
 #
-# 표류는 서쪽으로 흐르는데 하류에서 강이 북으로 휘기 때문에 위도를 조금만
-# 낮게 잡아도 파티클이 금방 남안에 부딪힌다. 그래서 "서쪽으로 물이 몇 m
-# 이어지는가" 를 폴리곤으로 직접 재서 골랐다:
-#     37.5340, 126.9290 -> 580m   (실제로 5분 만에 절반이 육지였다)
-#     37.5339, 126.9376 -> 1300m  <- 채택 (섬 남동 대각 270m/209m)
-# 지도 서쪽 끝까지가 약 383m 이므로 충분한 여유다.
+# 폴리곤으로 검증한 사항 (표류는 서쪽으로 흐른다):
+#   - 강 안이어야 한다. 시작하자마자 육지 판정이면 시뮬이 무의미하다.
+#   - 서쪽으로 물이 이어져야 한다. 하류에서 강이 북으로 휘기 때문에
+#     위도를 조금만 낮게 잡아도 파티클이 금방 남안에 부딪힌다
+#     (실측: 37.5340 은 5분 만에 절반이 육지였다).
 #
-# 위도를 섬 남동 모서리에서 89m 남쪽으로만 내린 이유: 더 내리면 지도가
-# 100% 물이 되어 인쇄물에 육안 기준점이 하나도 없다. 이 값이면 섬 남단이
-# 지도 위쪽으로 61m 들어와 바닥에 깔 때 방향을 잡을 수 있다.
-MAPO_LAT = 37.5339
-MAPO_LON = 126.9376
+# 이 위치에 두는 이유: 아래 폴리곤 선별 박스가 이 좌표를 기준으로 잡히므로
+# hangang.cx 호출보다 먼저 정의돼야 한다.
+MAPO_LAT = 37.5336
+MAPO_LON = 126.9364
 
 log("Loading Han River polygon...")
 hangang = ox.features_from_place(
@@ -136,7 +134,7 @@ DT    = 0.1
 # SPEED = 1프레임당 시뮬레이션 스텝 수.
 # 드론 실기 연동에는 1 (약 1.5배속) 을 쓴다. 60이면 약 90배속이라
 # 드론이 이륙하기도 전에 파티클이 지도를 벗어난다.
-SPEED = 5
+SPEED = 3
 pvlon = particle_vx / 88000
 pvlat = particle_vy / 111000
 DIFFUSIVITY = 2.0 / 88000 * np.sqrt(2 * DT)
@@ -146,33 +144,25 @@ PRINT_INTERVAL    = 180
 last_printed_time = -PRINT_INTERVAL
 
 # ─────────────────────────────────────────
-# [3-1] 실물 축소 지도 영역 (3m × 2m, 축척 1:150)
+# [3-1] 실물 축소 지도 영역 (3m × 2m, 축척 1:400)
 # ─────────────────────────────────────────
 M_PER_DEG_LON = 88000    # 위도 37.5° 기준
 M_PER_DEG_LAT = 111000
 
-# 축척은 "인쇄할 지도 이미지가 덮는 실제 범위" 에 맞춘다.
-# 참고 캡처는 약 3080 x 2130 m 범위였고, 2.89m 종이로 덮으려면 1:1100 이다.
-#
-# 축척을 키우는 게 드론에 불리할 것 같지만 반대다. 인쇄물 크기는 그대로라
-# 표류가 종이 위에서 움직이는 속도가 느려진다:
-#     1:150  -> 목표가 20cm(=30m) 벌어지는 데 3초   Tello 가 못 따라간다
-#     1:1100 -> 220m 라 24초                        여유 있고, 그 사이는
-#                                                    제자리 회전으로 수색 표현
-MAP_SCALE   = 1100
-# 인쇄할 지도 이미지의 가로세로 비율과 반드시 같아야 한다. 다르면 종이 위
-# 지형이 늘어나거나 눌려서, 화면 좌표와 바닥 좌표가 그만큼 어긋난다.
-#
-# 운용 공간이 2 x 3m 라 긴 쪽(3m)을 가로로 다 쓰고, 세로는 인쇄할 지도
-# 이미지의 비율대로 1.77m 가 됐다 (3.0 / 1.77 = 1.695).
-#   비율이 다르면: 이미지 픽셀 가로/세로를 재서
-#   브라우저 '실물 지도' 카드의 가로 m / 세로 m 를 그 비율로 바꾸면 된다.
+# 축척·인쇄물 크기·여유값은 전부 배경 사진(static/mapomap.jpg)에 묶여 있다.
+# 사진이 1273x849px = 비율 1.4994 이라 인쇄물도 3:2 여야 지형이 안 늘어난다.
+MAP_SCALE   = 400     # 1:400
 MAP_PRINT_W = 3.0     # 실물 지도 가로 m (동서)
-MAP_PRINT_H = 1.77    # 실물 지도 세로 m (남북)
-# 입수 지점에서 동쪽 여유. 나머지가 서쪽 표류 구간이 된다.
-# 축척을 키웠으므로 같이 키운다 — 50m 로 두면 3.2km 지도에서 입수 지점이
-# 오른쪽 끝 4cm 에 붙어버려 캡처의 구도와 달라진다.
-MAP_EAST_M  = 1130.0
+MAP_PRINT_H = 2.0     # 실물 지도 세로 m (남북)
+# 입수 지점(기기 좌표)에서 동/남쪽 여유 — 배경 사진(static/mapomap.jpg,
+# 1273×849px)에서 실제 마포대교가 지나는 픽셀(약 x=1112, y=752, 사진
+# 좌상단 기준)에 입수 지점 별표가 정확히 얹히도록 역산한 값이다:
+#   east_m  = MAP_W_M  * (1 - 1112/1273) ≈ 151.8
+#   south_m = MAP_H_M  * (1 -  752/849 ) ≈  91.4
+# 사진이나 지도 크기(MAP_PRINT_W/H, MAP_SCALE)가 바뀌면 이 값도 다시
+# 계산해야 한다 — 사진 속 실제 위치와 무관하게 나머지는 자동으로 안 맞음.
+MAP_EAST_M  = 151.8    # 입수 지점에서 동쪽 여유 (나머지는 서쪽 표류 구간)
+MAP_SOUTH_M = 91.4     # 입수 지점에서 남쪽 여유 (나머지는 북쪽 구간)
 
 GRID_CELL_M = 15.0    # 격자 한 칸이 덮을 실제 거리 (칸이 정사각형에 가깝게 유지됨)
 
@@ -229,14 +219,14 @@ def offset_from_takeoff(lon, lat):
             (lat - map_lat_min) * M_PER_DEG_LAT / MAP_SCALE)
 
 
-def _rebuild_map(print_w=None, print_h=None, scale=None, east_m=None):
+def _rebuild_map(print_w=None, print_h=None, scale=None, east_m=None, south_m=None):
     """지도 설정을 바꾸고 거기에 딸린 것들을 전부 다시 계산한다.
 
     누적 격자는 지도 영역에 "고정" 되어야 한다. 매 프레임 파티클 무게중심으로
     재중심을 잡으면 서로 다른 좌표계의 카운트를 더하게 되어 누적이 뭉개진다.
     따라서 지도가 바뀌면 격자도 통째로 새로 만들고 누적을 리셋해야 한다.
     """
-    global MAP_SCALE, MAP_PRINT_W, MAP_PRINT_H, MAP_EAST_M, MAP_W_M, MAP_H_M
+    global MAP_SCALE, MAP_PRINT_W, MAP_PRINT_H, MAP_EAST_M, MAP_SOUTH_M, MAP_W_M, MAP_H_M
     global map_lon_min, map_lon_max, map_lat_min, map_lat_max
     global GRID_NX, GRID_NY, GRID_XEDGES, GRID_YEDGES, GRID_XCENT, GRID_YCENT
     global NMS_MIN_DIST_M, accumulated_hist, takeoff_lon, takeoff_lat
@@ -245,14 +235,18 @@ def _rebuild_map(print_w=None, print_h=None, scale=None, east_m=None):
     if print_w is not None: MAP_PRINT_W = float(print_w)
     if print_h is not None: MAP_PRINT_H = float(print_h)
     if east_m  is not None: MAP_EAST_M  = float(east_m)
+    if south_m is not None: MAP_SOUTH_M = float(south_m)
 
     MAP_W_M = MAP_PRINT_W * MAP_SCALE          # 지도가 덮는 실제 거리 (동서)
     MAP_H_M = MAP_PRINT_H * MAP_SCALE          # 동일 (남북)
 
     map_lon_max = MAPO_LON + MAP_EAST_M / M_PER_DEG_LON
     map_lon_min = map_lon_max - MAP_W_M / M_PER_DEG_LON
-    map_lat_max = MAPO_LAT + (MAP_H_M / 2) / M_PER_DEG_LAT
-    map_lat_min = MAPO_LAT - (MAP_H_M / 2) / M_PER_DEG_LAT
+    # 예전에는 입수 지점이 남북으로 정중앙(±MAP_H_M/2)이었는데, 배경 사진
+    # 위에서 실제 위치(마포대교 부근)에 별표가 얹히려면 남북도 동서
+    # (MAP_EAST_M)처럼 비대칭 여유가 필요해 MAP_SOUTH_M을 추가했다.
+    map_lat_min = MAPO_LAT - MAP_SOUTH_M / M_PER_DEG_LAT
+    map_lat_max = map_lat_min + MAP_H_M / M_PER_DEG_LAT
 
     # 칸 크기를 먼저 정한 뒤 나눈다. 칸 수를 각각 자르면 큰 지도에서
     # 상한(80)에 걸려 칸이 직사각형으로 찌그러진다.
@@ -492,6 +486,7 @@ def simulation_step():
                     "real_w_m": MAP_W_M,
                     "real_h_m": MAP_H_M,
                     "east_m":   MAP_EAST_M,
+                    "south_m":  MAP_SOUTH_M,
                     "grid_nx":  GRID_NX, "grid_ny": GRID_NY,
                     "nms_m":    round(NMS_MIN_DIST_M, 1),
                     "lon_min": map_lon_min, "lon_max": map_lon_max,
@@ -618,6 +613,7 @@ def simulation_step():
                 "real_w_m": MAP_W_M,               # 덮는 실제 거리 (동서)
                 "real_h_m": MAP_H_M,               # 덮는 실제 거리 (남북)
                 "east_m":   MAP_EAST_M,
+                "south_m":  MAP_SOUTH_M,
                 "grid_nx":  GRID_NX, "grid_ny": GRID_NY,
                 "nms_m":    round(NMS_MIN_DIST_M, 1),
                 "lon_min": map_lon_min, "lon_max": map_lon_max,
@@ -837,10 +833,14 @@ async def post_takeoff_reset():
 
 class MapIn(BaseModel):
     # 실물 지도 크기(m)와 축척. 덮는 실제 거리는 둘의 곱으로 정해진다.
+    # east_m/south_m 기본값은 배경 사진(static/mapomap.jpg) 속 마포대교
+    # 위치에 입수 지점 별표가 얹히도록 맞춘 값이다 — MAP_EAST_M/MAP_SOUTH_M
+    # 정의부(위쪽) 주석 참고.
     width_m:  float = Field(3.0,   ge=0.3, le=20.0)
     height_m: float = Field(2.0,   ge=0.3, le=20.0)
     scale:    float = Field(150.0, ge=10.0, le=2000.0)
-    east_m:   float = Field(50.0,  ge=0.0, le=5000.0)  # 입수 지점에서 동쪽 여유
+    east_m:   float = Field(151.8, ge=0.0, le=5000.0)  # 입수 지점에서 동쪽 여유
+    south_m:  float = Field(91.4,  ge=0.0, le=5000.0)  # 입수 지점에서 남쪽 여유
 
 
 @app.post("/map")
@@ -853,8 +853,12 @@ async def post_map(cfg: MapIn):
         raise HTTPException(
             422, f"동쪽 여유({cfg.east_m:.0f}m)가 지도 가로"
                  f"({cfg.width_m * cfg.scale:.0f}m)보다 큽니다")
+    if cfg.south_m > cfg.height_m * cfg.scale:
+        raise HTTPException(
+            422, f"남쪽 여유({cfg.south_m:.0f}m)가 지도 세로"
+                 f"({cfg.height_m * cfg.scale:.0f}m)보다 큽니다")
     new_map_cfg = {"print_w": cfg.width_m, "print_h": cfg.height_m,
-                   "scale": cfg.scale, "east_m": cfg.east_m}
+                   "scale": cfg.scale, "east_m": cfg.east_m, "south_m": cfg.south_m}
     return {"ok": True, **cfg.model_dump(),
             "real_w_m": cfg.width_m * cfg.scale,
             "real_h_m": cfg.height_m * cfg.scale}
@@ -865,7 +869,12 @@ async def post_map_reset():
     global new_map_cfg
     if drone_api.driver.status()["running"]:
         raise HTTPException(409, "비행 중에는 지도를 바꿀 수 없습니다")
-    new_map_cfg = {"print_w": 3.0, "print_h": 2.0, "scale": 150.0, "east_m": 50.0}
+    # south_m을 안 주면 _rebuild_map()이 지금 값(사진 보정용 91.4 등)을 그대로
+    # 들고 있어 east_m만 50으로 리셋되는 어중간한 상태가 된다 — 여기선 이
+    # 작은 데모 지도(1:150) 본연의 정중앙 배치(= height_m*scale/2)로 같이
+    # 되돌린다.
+    new_map_cfg = {"print_w": 3.0, "print_h": 2.0, "scale": 150.0,
+                   "east_m": 50.0, "south_m": 150.0}
     return {"ok": True}
 
 

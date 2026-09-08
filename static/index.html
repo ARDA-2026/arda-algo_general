@@ -721,7 +721,9 @@
         </div>
         <div class="params" style="margin-top:0">
           <label>동쪽 여유 m (입수 지점 기준)
-            <input type="number" id="mp-e" value="50" min="0" max="5000" step="10"></label>
+            <input type="number" id="mp-e" value="151.8" min="0" max="5000" step="10"></label>
+          <label>남쪽 여유 m (입수 지점 기준)
+            <input type="number" id="mp-so" value="91.4" min="0" max="5000" step="10"></label>
         </div>
         <div class="stat" id="mp-info"></div>
         <div style="display:flex;gap:6px;margin-top:6px">
@@ -748,8 +750,7 @@
     const PALETTES = {
       dark: {
         bg: '#0d1117',
-        grid: 'rgba(255,255,255,0.06)', gridLabel: 'rgba(255,255,255,0.30)',
-        riverFill: 'rgba(70,130,180,0.25)', riverStroke: 'rgba(100,160,210,0.50)',
+        gridLabel: 'rgba(255,255,255,0.30)',
         scrim: 'rgba(5,8,14,0.55)',
         mapFrame: '#7dd3fc', mapText: 'rgba(190,225,255,0.9)',
         particle: 'rgba(255,160,50,0.55)',
@@ -766,8 +767,7 @@
       },
       light: {
         bg: '#f8fafc',
-        grid: 'rgba(0,0,0,0.08)', gridLabel: 'rgba(0,0,0,0.45)',
-        riverFill: 'rgba(56,132,196,0.18)', riverStroke: 'rgba(30,90,150,0.65)',
+        gridLabel: 'rgba(0,0,0,0.45)',
         scrim: 'rgba(248,250,252,0.68)',
         mapFrame: '#0369a1', mapText: 'rgba(12,60,100,0.95)',
         particle: 'rgba(217,95,14,0.65)',
@@ -833,7 +833,16 @@
     let boundsAdopted = false, mapFitted = false;
 
     let W = 1, H = 1;
-    let riverGeojson = null, state = null, autoFollow = false;
+    let state = null, autoFollow = false;
+
+    // 실물 지도 배경 사진(마포/밤섬 항공뷰) — 지도 사각형(m.lon_min~lon_max,
+    // m.lat_min~lat_max) 안을 그대로 채워서 드론 활동 지도로 쓴다. 로드되기
+    // 전에는 그리지 않고(mapBgLoaded), 로드가 끝나면 그 프레임을 다시
+    // 그리도록 requestRender()를 한 번 걸어준다.
+    let mapBgLoaded = false;
+    const mapBgImg = new Image();
+    mapBgImg.onload = () => { mapBgLoaded = true; requestRender(); };
+    mapBgImg.src = '/static/mapomap.jpg';
 
     // 경도 1° 와 위도 1° 의 실제 길이가 다르므로(88km vs 111km) 화면에도 그 비율을
     // 반영해야 실물 지도 사각형이 정확한 3:2 로 보인다.
@@ -975,6 +984,7 @@
         height_m: numVal('mp-h', 2),
         scale: numVal('mp-s', 150),
         east_m: numVal('mp-e', 50),
+        south_m: numVal('mp-so', 150),
       };
       const btn = document.getElementById('mp-apply');
       btn.disabled = true;
@@ -1023,6 +1033,7 @@
         document.getElementById('mp-h').value = m.height_m;
         document.getElementById('mp-s').value = m.scale;
         document.getElementById('mp-e').value = m.east_m;
+        document.getElementById('mp-so').value = m.south_m;
       }
       setHTML('mp-info',
         `<span>덮는 실제 영역</span>
@@ -1124,45 +1135,14 @@
     // ─────────────────────────────────────────────
     // 그리기
     // ─────────────────────────────────────────────
-    function niceStep(span) {
-      const raw = span / 5, mag = Math.pow(10, Math.floor(Math.log10(raw)));
-      return [1, 2, 5, 10].find(m => m * mag >= raw) * mag;
-    }
-    function drawGrid() {
-      ctx.strokeStyle = C.grid; ctx.lineWidth = 0.5;
-      ctx.font = '9px monospace'; ctx.fillStyle = C.gridLabel;
-      ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-      const a = fromCanvas(0, H), b = fromCanvas(W, 0);
-      const ls = niceStep(b.lon - a.lon), ts = niceStep(b.lat - a.lat);
-      const dec = Math.max(0, -Math.floor(Math.log10(ls)) + 1);
-      for (let lon = Math.ceil(a.lon / ls) * ls; lon <= b.lon; lon += ls) {
-        const [x] = toCanvas(lon, a.lat);
-        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
-        ctx.fillText(lon.toFixed(dec), x + 2, 2);
-      }
-      for (let lat = Math.ceil(a.lat / ts) * ts; lat <= b.lat; lat += ts) {
-        const [, y] = toCanvas(a.lon, lat);
-        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-        ctx.fillText(lat.toFixed(dec), 2, y + 2);
-      }
-    }
-
-    function drawRiver() {
-      if (!riverGeojson) return;
-      ctx.fillStyle = C.riverFill; ctx.strokeStyle = C.riverStroke; ctx.lineWidth = 0.8;
-      for (const feat of riverGeojson.features) {
-        const g = feat.geometry; if (!g) continue;
-        const polys = g.type === 'Polygon' ? [g.coordinates]
-          : g.type === 'MultiPolygon' ? g.coordinates : [];
-        for (const poly of polys) for (const ring of poly) {
-          ctx.beginPath();
-          for (let i = 0; i < ring.length; i++) {
-            const [x, y] = toCanvas(ring[i][0], ring[i][1]);
-            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-          }
-          ctx.closePath(); ctx.fill(); ctx.stroke();
-        }
-      }
+    // 실물 지도 배경 사진 — 지도 사각형 안을 그 사진으로 그대로 채운다.
+    // 좌표 격자·강 폴리곤 등 예전에 배경으로 그리던 요소는 다 걷어내고, 이
+    // 사진 하나만 지도 사각형의 배경이 된다(사각형 밖은 계속 스크림 처리).
+    function drawMapBackground(m) {
+      if (!m || !mapBgLoaded) return;
+      const [x1, y1] = toCanvas(m.lon_min, m.lat_max);
+      const [x2, y2] = toCanvas(m.lon_max, m.lat_min);
+      ctx.drawImage(mapBgImg, x1, y1, x2 - x1, y2 - y1);
     }
 
     // 실물 지도 밖을 죽인다. 드론은 이 사각형 밖으로 나갈 수 없다.
@@ -1522,8 +1502,7 @@
       ctx.clearRect(0, 0, W, H);
       ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
 
-      drawGrid();
-      drawRiver();
+      drawMapBackground(m);
       drawMapScrim(m);
       drawHeatmap(s.heatmap, s.heatmap_extent, vmaxEMA);
       drawStranded(s.stranded_lons || [], s.stranded_lats || []);
@@ -2151,11 +2130,6 @@
       requestRender();
     }
     window.addEventListener('resize', resize);
-
-    fetch('/river-geojson')
-      .then(r => r.json())
-      .then(g => { riverGeojson = g; requestRender(); })
-      .catch(e => console.warn('강 폴리곤 로드 실패', e));
 
     function updateSimCard(d) {
       const status = document.getElementById('sim-status');
