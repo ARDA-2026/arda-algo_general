@@ -88,8 +88,8 @@ river_geojson = json.loads(hangang_mapo.geometry.to_json())
 # [3] 파티클 초기화
 # ─────────────────────────────────────────
 N = 200
-MAPO_LAT = 37.540
-MAPO_LON = 126.907
+MAPO_LAT = 37.5336
+MAPO_LON = 126.9364
 # POST /reset이 되돌아갈 기본 입수 지점 — MAPO_LON/LAT은 낙하 확정이 올
 # 때마다 그 지점으로 덮어써지므로, 원래 기본값을 따로 보존해둔다.
 DEFAULT_MAPO_LON = MAPO_LON
@@ -111,7 +111,7 @@ DT    = 0.1
 # SPEED = 1프레임당 시뮬레이션 스텝 수.
 # 드론 실기 연동에는 1 (약 1.5배속) 을 쓴다. 60이면 약 90배속이라
 # 드론이 이륙하기도 전에 파티클이 지도를 벗어난다.
-SPEED = 1
+SPEED = 10
 pvlon = particle_vx / 88000
 pvlat = particle_vy / 111000
 DIFFUSIVITY = 2.0 / 88000 * np.sqrt(2 * DT)
@@ -121,15 +121,23 @@ PRINT_INTERVAL    = 180
 last_printed_time = -PRINT_INTERVAL
 
 # ─────────────────────────────────────────
-# [3-1] 실물 축소 지도 영역 (3m × 2m, 축척 1:150)
+# [3-1] 실물 축소 지도 영역 (3m × 2m, 축척 1:400)
 # ─────────────────────────────────────────
 M_PER_DEG_LON = 88000    # 위도 37.5° 기준
 M_PER_DEG_LAT = 111000
 
-MAP_SCALE   = 150     # 1:150
+MAP_SCALE   = 400     # 1:400
 MAP_PRINT_W = 3.0     # 실물 지도 가로 m (동서)
 MAP_PRINT_H = 2.0     # 실물 지도 세로 m (남북)
-MAP_EAST_M  = 50.0    # 입수 지점에서 동쪽 여유 (나머지는 서쪽 표류 구간)
+# 입수 지점(기기 좌표)에서 동/남쪽 여유 — 배경 사진(static/mapomap.jpg,
+# 1273×849px)에서 실제 마포대교가 지나는 픽셀(약 x=1112, y=752, 사진
+# 좌상단 기준)에 입수 지점 별표가 정확히 얹히도록 역산한 값이다:
+#   east_m  = MAP_W_M  * (1 - 1112/1273) ≈ 151.8
+#   south_m = MAP_H_M  * (1 -  752/849 ) ≈  91.4
+# 사진이나 지도 크기(MAP_PRINT_W/H, MAP_SCALE)가 바뀌면 이 값도 다시
+# 계산해야 한다 — 사진 속 실제 위치와 무관하게 나머지는 자동으로 안 맞음.
+MAP_EAST_M  = 151.8    # 입수 지점에서 동쪽 여유 (나머지는 서쪽 표류 구간)
+MAP_SOUTH_M = 91.4     # 입수 지점에서 남쪽 여유 (나머지는 북쪽 구간)
 
 GRID_CELL_M = 15.0    # 격자 한 칸이 덮을 실제 거리 (칸이 정사각형에 가깝게 유지됨)
 
@@ -168,14 +176,14 @@ def default_takeoff():
     return MAPO_LON + east / M_PER_DEG_LON, MAPO_LAT
 
 
-def _rebuild_map(print_w=None, print_h=None, scale=None, east_m=None):
+def _rebuild_map(print_w=None, print_h=None, scale=None, east_m=None, south_m=None):
     """지도 설정을 바꾸고 거기에 딸린 것들을 전부 다시 계산한다.
 
     누적 격자는 지도 영역에 "고정" 되어야 한다. 매 프레임 파티클 무게중심으로
     재중심을 잡으면 서로 다른 좌표계의 카운트를 더하게 되어 누적이 뭉개진다.
     따라서 지도가 바뀌면 격자도 통째로 새로 만들고 누적을 리셋해야 한다.
     """
-    global MAP_SCALE, MAP_PRINT_W, MAP_PRINT_H, MAP_EAST_M, MAP_W_M, MAP_H_M
+    global MAP_SCALE, MAP_PRINT_W, MAP_PRINT_H, MAP_EAST_M, MAP_SOUTH_M, MAP_W_M, MAP_H_M
     global map_lon_min, map_lon_max, map_lat_min, map_lat_max
     global GRID_NX, GRID_NY, GRID_XEDGES, GRID_YEDGES, GRID_XCENT, GRID_YCENT
     global NMS_MIN_DIST_M, accumulated_hist, takeoff_lon, takeoff_lat
@@ -184,14 +192,18 @@ def _rebuild_map(print_w=None, print_h=None, scale=None, east_m=None):
     if print_w is not None: MAP_PRINT_W = float(print_w)
     if print_h is not None: MAP_PRINT_H = float(print_h)
     if east_m  is not None: MAP_EAST_M  = float(east_m)
+    if south_m is not None: MAP_SOUTH_M = float(south_m)
 
     MAP_W_M = MAP_PRINT_W * MAP_SCALE          # 지도가 덮는 실제 거리 (동서)
     MAP_H_M = MAP_PRINT_H * MAP_SCALE          # 동일 (남북)
 
     map_lon_max = MAPO_LON + MAP_EAST_M / M_PER_DEG_LON
     map_lon_min = map_lon_max - MAP_W_M / M_PER_DEG_LON
-    map_lat_max = MAPO_LAT + (MAP_H_M / 2) / M_PER_DEG_LAT
-    map_lat_min = MAPO_LAT - (MAP_H_M / 2) / M_PER_DEG_LAT
+    # 예전에는 입수 지점이 남북으로 정중앙(±MAP_H_M/2)이었는데, 배경 사진
+    # 위에서 실제 위치(마포대교 부근)에 별표가 얹히려면 남북도 동서
+    # (MAP_EAST_M)처럼 비대칭 여유가 필요해 MAP_SOUTH_M을 추가했다.
+    map_lat_min = MAPO_LAT - MAP_SOUTH_M / M_PER_DEG_LAT
+    map_lat_max = map_lat_min + MAP_H_M / M_PER_DEG_LAT
 
     # 칸 크기를 먼저 정한 뒤 나눈다. 칸 수를 각각 자르면 큰 지도에서
     # 상한(80)에 걸려 칸이 직사각형으로 찌그러진다.
@@ -418,6 +430,7 @@ def simulation_step():
                     "real_w_m": MAP_W_M,
                     "real_h_m": MAP_H_M,
                     "east_m":   MAP_EAST_M,
+                    "south_m":  MAP_SOUTH_M,
                     "grid_nx":  GRID_NX, "grid_ny": GRID_NY,
                     "nms_m":    round(NMS_MIN_DIST_M, 1),
                     "lon_min": map_lon_min, "lon_max": map_lon_max,
@@ -541,6 +554,7 @@ def simulation_step():
                 "real_w_m": MAP_W_M,               # 덮는 실제 거리 (동서)
                 "real_h_m": MAP_H_M,               # 덮는 실제 거리 (남북)
                 "east_m":   MAP_EAST_M,
+                "south_m":  MAP_SOUTH_M,
                 "grid_nx":  GRID_NX, "grid_ny": GRID_NY,
                 "nms_m":    round(NMS_MIN_DIST_M, 1),
                 "lon_min": map_lon_min, "lon_max": map_lon_max,
@@ -702,10 +716,14 @@ async def post_takeoff_reset():
 
 class MapIn(BaseModel):
     # 실물 지도 크기(m)와 축척. 덮는 실제 거리는 둘의 곱으로 정해진다.
+    # east_m/south_m 기본값은 배경 사진(static/mapomap.jpg) 속 마포대교
+    # 위치에 입수 지점 별표가 얹히도록 맞춘 값이다 — MAP_EAST_M/MAP_SOUTH_M
+    # 정의부(위쪽) 주석 참고.
     width_m:  float = Field(3.0,   ge=0.3, le=20.0)
     height_m: float = Field(2.0,   ge=0.3, le=20.0)
     scale:    float = Field(150.0, ge=10.0, le=2000.0)
-    east_m:   float = Field(50.0,  ge=0.0, le=5000.0)  # 입수 지점에서 동쪽 여유
+    east_m:   float = Field(151.8, ge=0.0, le=5000.0)  # 입수 지점에서 동쪽 여유
+    south_m:  float = Field(91.4,  ge=0.0, le=5000.0)  # 입수 지점에서 남쪽 여유
 
 
 @app.post("/map")
@@ -718,8 +736,12 @@ async def post_map(cfg: MapIn):
         raise HTTPException(
             422, f"동쪽 여유({cfg.east_m:.0f}m)가 지도 가로"
                  f"({cfg.width_m * cfg.scale:.0f}m)보다 큽니다")
+    if cfg.south_m > cfg.height_m * cfg.scale:
+        raise HTTPException(
+            422, f"남쪽 여유({cfg.south_m:.0f}m)가 지도 세로"
+                 f"({cfg.height_m * cfg.scale:.0f}m)보다 큽니다")
     new_map_cfg = {"print_w": cfg.width_m, "print_h": cfg.height_m,
-                   "scale": cfg.scale, "east_m": cfg.east_m}
+                   "scale": cfg.scale, "east_m": cfg.east_m, "south_m": cfg.south_m}
     return {"ok": True, **cfg.model_dump(),
             "real_w_m": cfg.width_m * cfg.scale,
             "real_h_m": cfg.height_m * cfg.scale}
@@ -730,7 +752,12 @@ async def post_map_reset():
     global new_map_cfg
     if drone_api.driver.status()["running"]:
         raise HTTPException(409, "비행 중에는 지도를 바꿀 수 없습니다")
-    new_map_cfg = {"print_w": 3.0, "print_h": 2.0, "scale": 150.0, "east_m": 50.0}
+    # south_m을 안 주면 _rebuild_map()이 지금 값(사진 보정용 91.4 등)을 그대로
+    # 들고 있어 east_m만 50으로 리셋되는 어중간한 상태가 된다 — 여기선 이
+    # 작은 데모 지도(1:150) 본연의 정중앙 배치(= height_m*scale/2)로 같이
+    # 되돌린다.
+    new_map_cfg = {"print_w": 3.0, "print_h": 2.0, "scale": 150.0,
+                   "east_m": 50.0, "south_m": 150.0}
     return {"ok": True}
 
 
