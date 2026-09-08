@@ -67,14 +67,41 @@ log(f"[INIT] velocity_x={velocity_x:.4f} m/s")
 # ─────────────────────────────────────────
 # [2] OSM 한강 폴리곤
 # ─────────────────────────────────────────
+# 기본 입수 지점 — 밤섬 남동쪽 대각 150m 지점.
+#
+# 밤섬은 강을 두 수로로 가른다. 폴리곤에서 직접 잰 섬 범위는
+#     경도 126.9220~126.9345 (1100m), 위도 37.5358~37.5413 (611m)
+# 이고, 그 남동 모서리 (37.5358, 126.9345) 에서 대각으로 150m 떨어뜨렸다.
+#
+# 표류는 서쪽으로 흐르는데 하류에서 강이 북으로 휘기 때문에 위도를 조금만
+# 낮게 잡아도 파티클이 금방 남안에 부딪힌다. 그래서 "서쪽으로 물이 몇 m
+# 이어지는가" 를 폴리곤으로 직접 재서 골랐다:
+#     37.5340, 126.9290 -> 580m   (실제로 5분 만에 절반이 육지였다)
+#     37.5339, 126.9376 -> 1300m  <- 채택 (섬 남동 대각 270m/209m)
+# 지도 서쪽 끝까지가 약 383m 이므로 충분한 여유다.
+#
+# 위도를 섬 남동 모서리에서 89m 남쪽으로만 내린 이유: 더 내리면 지도가
+# 100% 물이 되어 인쇄물에 육안 기준점이 하나도 없다. 이 값이면 섬 남단이
+# 지도 위쪽으로 61m 들어와 바닥에 깔 때 방향을 잡을 수 있다.
+MAPO_LAT = 37.5339
+MAPO_LON = 126.9376
+
 log("Loading Han River polygon...")
 hangang = ox.features_from_place(
     "Seoul, South Korea",
     tags={"natural": "water", "water": "river"}
 )
 
-lon_min, lon_max = 126.900, 126.918
-lat_min, lat_max = 37.537, 37.546
+# 입수 지점 주변만 남긴다. 좌표를 하드코딩해두면 MAPO 를 옮겼을 때
+# 엉뚱한 지역의 폴리곤만 남아 강이 통째로 사라진다 — .cx 가 "박스에
+# 걸치는 피처"를 고르는 방식이라 한강 본류가 한 덩어리인 동안에는
+# 우연히 동작하지만, 기대서는 안 되는 성질이다.
+#
+# 여유 0.05도 = 동서 약 4.4km, 남북 약 5.5km. 지도를 1:800(2.4km)까지
+# 키워도 덮는다.
+POLY_MARGIN_DEG = 0.05
+lon_min, lon_max = MAPO_LON - POLY_MARGIN_DEG, MAPO_LON + POLY_MARGIN_DEG
+lat_min, lat_max = MAPO_LAT - POLY_MARGIN_DEG, MAPO_LAT + POLY_MARGIN_DEG
 
 hangang_mapo = hangang.cx[lon_min:lon_max, lat_min:lat_max]
 hangang_mapo = hangang_mapo[hangang_mapo.geometry.area > 0.00005]
@@ -88,8 +115,6 @@ river_geojson = json.loads(hangang_mapo.geometry.to_json())
 # [3] 파티클 초기화
 # ─────────────────────────────────────────
 N = 200
-MAPO_LAT = 37.540
-MAPO_LON = 126.907
 # POST /reset이 되돌아갈 기본 입수 지점 — MAPO_LON/LAT은 낙하 확정이 올
 # 때마다 그 지점으로 덮어써지므로, 원래 기본값을 따로 보존해둔다.
 DEFAULT_MAPO_LON = MAPO_LON
@@ -111,7 +136,7 @@ DT    = 0.1
 # SPEED = 1프레임당 시뮬레이션 스텝 수.
 # 드론 실기 연동에는 1 (약 1.5배속) 을 쓴다. 60이면 약 90배속이라
 # 드론이 이륙하기도 전에 파티클이 지도를 벗어난다.
-SPEED = 1
+SPEED = 5
 pvlon = particle_vx / 88000
 pvlat = particle_vy / 111000
 DIFFUSIVITY = 2.0 / 88000 * np.sqrt(2 * DT)
@@ -126,10 +151,28 @@ last_printed_time = -PRINT_INTERVAL
 M_PER_DEG_LON = 88000    # 위도 37.5° 기준
 M_PER_DEG_LAT = 111000
 
-MAP_SCALE   = 150     # 1:150
+# 축척은 "인쇄할 지도 이미지가 덮는 실제 범위" 에 맞춘다.
+# 참고 캡처는 약 3080 x 2130 m 범위였고, 2.89m 종이로 덮으려면 1:1100 이다.
+#
+# 축척을 키우는 게 드론에 불리할 것 같지만 반대다. 인쇄물 크기는 그대로라
+# 표류가 종이 위에서 움직이는 속도가 느려진다:
+#     1:150  -> 목표가 20cm(=30m) 벌어지는 데 3초   Tello 가 못 따라간다
+#     1:1100 -> 220m 라 24초                        여유 있고, 그 사이는
+#                                                    제자리 회전으로 수색 표현
+MAP_SCALE   = 1100
+# 인쇄할 지도 이미지의 가로세로 비율과 반드시 같아야 한다. 다르면 종이 위
+# 지형이 늘어나거나 눌려서, 화면 좌표와 바닥 좌표가 그만큼 어긋난다.
+#
+# 운용 공간이 2 x 3m 라 긴 쪽(3m)을 가로로 다 쓰고, 세로는 인쇄할 지도
+# 이미지의 비율대로 1.77m 가 됐다 (3.0 / 1.77 = 1.695).
+#   비율이 다르면: 이미지 픽셀 가로/세로를 재서
+#   브라우저 '실물 지도' 카드의 가로 m / 세로 m 를 그 비율로 바꾸면 된다.
 MAP_PRINT_W = 3.0     # 실물 지도 가로 m (동서)
-MAP_PRINT_H = 2.0     # 실물 지도 세로 m (남북)
-MAP_EAST_M  = 50.0    # 입수 지점에서 동쪽 여유 (나머지는 서쪽 표류 구간)
+MAP_PRINT_H = 1.77    # 실물 지도 세로 m (남북)
+# 입수 지점에서 동쪽 여유. 나머지가 서쪽 표류 구간이 된다.
+# 축척을 키웠으므로 같이 키운다 — 50m 로 두면 3.2km 지도에서 입수 지점이
+# 오른쪽 끝 4cm 에 붙어버려 캡처의 구도와 달라진다.
+MAP_EAST_M  = 1130.0
 
 GRID_CELL_M = 15.0    # 격자 한 칸이 덮을 실제 거리 (칸이 정사각형에 가깝게 유지됨)
 
@@ -152,20 +195,38 @@ new_map_cfg = None    # POST /map 에서 설정
 #     Tello 최소 이동거리(20cm) 미만이 되어 "수색 우선순위 1번"이 스킵된다.
 #   - 드론이 지도의 입수 지점 표식(★)을 깔고 앉는다.
 #
-# 기본값: 지도 동쪽 변에서 실물 30cm 바깥 (강변 베이스에서 출격하는 모양)
-TAKEOFF_MARGIN_MAP_M = 0.30   # 지도 밖으로 나갈 거리 (실물 m)
+# 저장은 위경도가 아니라 "지도 좌하단(남서) 모서리 기준 오프셋" 으로 한다.
+#
+#   왜 절대 위경도로 두면 안 되나:
+#     바닥에 깔린 인쇄 지도와 그 옆의 드론은 물리적으로 붙어 있다. 그런데
+#     입수 지점(=지도 원점)은 열화상 감지 결과라 POST /report 마다 옮겨간다.
+#     이륙 지점을 절대 좌표로 박아두면 지도만 따라 움직이고 이륙 지점은
+#     제자리에 남아서, 드론은 바닥에서 1cm 도 안 움직였는데 소프트웨어만
+#     엉뚱한 자리를 (0,0) 으로 알게 된다.
+#     오프셋으로 저장하면 지도가 어디로 가든 물리적 배치가 그대로 유지된다.
+#
+#   좌하단을 기준으로 잡은 이유: 설치 당일 줄자로 재는 기준이 지도 모서리다.
+#   "왼쪽 아래 모서리에서 오른쪽 0.5m, 위로 0.2m" 가 바닥에서 바로 재진다.
+TAKEOFF_OFF_LIMIT_M = 3.0     # 지도 밖으로 허용할 최대 거리 (실물 m)
 
-takeoff_lon = takeoff_lat = 0.0
-takeoff_is_default = True     # 사용자가 직접 찍었으면 False. 지도가 바뀌어도 유지한다.
-new_takeoff = None            # POST /takeoff 에서 설정
+takeoff_off_e = 0.0           # 좌하단에서 오른쪽(동)  실물 m — 기본은 모서리 그 자리
+takeoff_off_n = 0.0           # 좌하단에서 위쪽(북)    실물 m
+takeoff_lon = takeoff_lat = 0.0   # 위 오프셋에서 매번 유도되는 값
+new_takeoff = None            # POST /takeoff* 에서 설정 — (east_m, north_m)
 
 NMS_MAX_COUNT = 10
 
 
-def default_takeoff():
-    """지도 동쪽 변 바깥 TAKEOFF_MARGIN_MAP_M 지점."""
-    east = MAP_EAST_M + TAKEOFF_MARGIN_MAP_M * MAP_SCALE
-    return MAPO_LON + east / M_PER_DEG_LON, MAPO_LAT
+def takeoff_from_offset(east_m, north_m):
+    """지도 좌하단(남서) 모서리 기준 실물 m 오프셋 -> 위경도."""
+    return (map_lon_min + east_m  * MAP_SCALE / M_PER_DEG_LON,
+            map_lat_min + north_m * MAP_SCALE / M_PER_DEG_LAT)
+
+
+def offset_from_takeoff(lon, lat):
+    """위경도 -> 지도 좌하단 기준 실물 m 오프셋 (지도 클릭용 역변환)."""
+    return ((lon - map_lon_min) * M_PER_DEG_LON / MAP_SCALE,
+            (lat - map_lat_min) * M_PER_DEG_LAT / MAP_SCALE)
 
 
 def _rebuild_map(print_w=None, print_h=None, scale=None, east_m=None):
@@ -204,15 +265,23 @@ def _rebuild_map(print_w=None, print_h=None, scale=None, east_m=None):
     GRID_XCENT  = (GRID_XEDGES[:-1] + GRID_XEDGES[1:]) / 2
     GRID_YCENT  = (GRID_YEDGES[:-1] + GRID_YEDGES[1:]) / 2
 
-    # waypoint 간 최소 간격은 지도 크기에 비례해야 한다.
-    # 고정 100m 로 두면 작은 지도에서는 지도 폭보다 커져 waypoint 가 1개만 남는다.
-    # 기본 지도(450m)에서 100m 가 되도록 잡은 비율.
-    NMS_MIN_DIST_M = MAP_W_M / 4.5
+    # waypoint 간 최소 간격. 지도 폭에 비례시키면 안 된다 — 그렇게 두면
+    # 지도를 키울 때 간격이 파티클 구름보다 커져서 2·3순위가 확률 0 인
+    # 자리에서 뽑힌다 (실측: 3.2km 지도에서 간격 706m -> 2·3순위가 끝까지 0.00%).
+    #
+    # 실제로 걸리는 제약은 "종이 위 거리" 다. 두 조건이 여기서 만난다:
+    #   (1) Tello 최소 이동이 종이 20cm 라, 지점이 그보다 촘촘하면 자동 순회에서
+    #       그 레그가 통째로 스킵된다 (실측: 19.3cm 간격 -> 16개 중 3개 스킵)
+    #   (2) 파티클 구름(4분에 450m 남짓)보다 넓으면 (1) 의 문제가 생긴다
+    # 종이 25cm 가 두 조건을 동시에 만족한다. 실측으로 스킵 0/16, 세 순위 모두
+    # 처음부터 확률이 붙었다.
+    NMS_MIN_DIST_M = 0.25 * MAP_SCALE
 
     accumulated_hist = np.zeros((GRID_NX, GRID_NY))
 
-    if takeoff_is_default:
-        takeoff_lon, takeoff_lat = default_takeoff()
+    # 이륙 지점은 지도에 붙어 다닌다. 지도가 옮겨가거나 크기가 바뀌면
+    # 좌하단 모서리도 따라 움직이므로 여기서 항상 다시 유도한다.
+    takeoff_lon, takeoff_lat = takeoff_from_offset(takeoff_off_e, takeoff_off_n)
 
 
 _rebuild_map()
@@ -325,7 +394,7 @@ def simulation_step():
     global observation, obs_history, new_observation
     global _step, last_printed_time
     global takeoff_lon, takeoff_lat, new_takeoff
-    global new_map_cfg, takeoff_is_default
+    global takeoff_off_e, takeoff_off_n, new_map_cfg
     global new_reset, sim_started, MAPO_LON, MAPO_LAT
 
     # 대기 상태로 리셋 (툴바 리셋 버튼 → POST /reset). 기본 입수 지점으로
@@ -346,11 +415,13 @@ def simulation_step():
         log(f"[MAP] {MAP_PRINT_W}x{MAP_PRINT_H}m 1:{MAP_SCALE:.0f} "
             f"= 실제 {MAP_W_M:.0f}x{MAP_H_M:.0f}m, 격자 {GRID_NX}x{GRID_NY}")
 
-    # 새 이륙 지점 적용 (툴바에서 지정 → POST /takeoff)
+    # 새 이륙 지점 적용 (툴바 지도 클릭 → POST /takeoff, 숫자 입력 → /takeoff/offset)
     if new_takeoff is not None:
-        takeoff_lon, takeoff_lat = new_takeoff
+        takeoff_off_e, takeoff_off_n = new_takeoff
         new_takeoff = None
-        takeoff_is_default = False
+        takeoff_lon, takeoff_lat = takeoff_from_offset(takeoff_off_e, takeoff_off_n)
+        log(f"[TAKEOFF] 지도 좌하단 기준 동{takeoff_off_e * 100:.0f} "
+            f"북{takeoff_off_n * 100:.0f} cm (실물)")
 
     # 새 관측값 적용 — 브라우저 클릭(POST /observation) 또는 arda-bringup의
     # 낙하 확정/재감지(POST /report)가 여기로 들어온다. 아직 대기 상태
@@ -366,6 +437,9 @@ def simulation_step():
             _reset_to_origin(obs_lon, obs_lat)
             sim_started = True
             log(f"[START] 낙하 판정 수신 — 시뮬레이션 시작: lat={obs_lat:.6f} lon={obs_lon:.6f}")
+            # 자동 추적이 켜져 있으면 드론을 띄운다. 이 시점엔 아직 waypoint 가
+            # 없으므로 곧바로 뜨지는 않고, 목표가 생길 때까지 대기했다 뜬다.
+            drone_api.notify_sim_started()
         else:
             observation = (obs_lon, obs_lat)
             obs_history.append((obs_lon, obs_lat))
@@ -425,6 +499,9 @@ def simulation_step():
                     "origin_lon": MAPO_LON, "origin_lat": MAPO_LAT,
                     "takeoff_lon": float(takeoff_lon),
                     "takeoff_lat": float(takeoff_lat),
+                    # 지도 좌하단(남서) 모서리 기준 실물 m — 바닥에서 재는 값
+                    "takeoff_off_e": float(takeoff_off_e),
+                    "takeoff_off_n": float(takeoff_off_n),
                 },
             })
         return
@@ -554,9 +631,18 @@ def simulation_step():
         })
 
 
+def _autotrack_tick():
+    """기체 연결을 기다리는 중이면 처리한다. 평소엔 즉시 반환."""
+    try:
+        drone_api.tick_autotrack()
+    except Exception as e:
+        log(f"[자동추적] tick 오류: {e}")
+
+
 def _sim_thread():
     while True:
         simulation_step()
+        _autotrack_tick()
         time.sleep(0.05)
 
 
@@ -676,28 +762,77 @@ async def post_reset():
     return {"ok": True}
 
 
-@app.post("/takeoff")
-async def post_takeoff(pt: ObservationIn):
-    """드론 이륙 지점을 지정한다 (Tello 기체 좌표의 원점).
+class TakeoffOffsetIn(BaseModel):
+    """지도 좌하단(남서) 모서리 기준 실물 m 오프셋."""
+    east_m:  float = Field(..., ge=-TAKEOFF_OFF_LIMIT_M)
+    north_m: float = Field(..., ge=-TAKEOFF_OFF_LIMIT_M)
 
-    비행 중에 바꾸면 지령 위치 누적이 어긋나므로 거부한다.
+
+def _stage_takeoff(east_m: float, north_m: float):
+    """이륙 지점 오프셋을 검증하고 시뮬 스레드가 집어가도록 올려둔다.
+
+    지도 밖으로 조금 나가는 건 정상이지만(강변 베이스에서 출격) 너무 멀면
+    지도 안 waypoint 까지의 거리가 Tello 한 번 이동 상한(500cm)을 넘겨
+    미션이 통째로 거부된다. 그럴 바엔 여기서 막는 게 낫다.
     """
     global new_takeoff
     if drone_api.driver.status()["running"]:
         raise HTTPException(409, "비행 중에는 이륙 지점을 바꿀 수 없습니다")
-    new_takeoff = (pt.lon, pt.lat)
-    return {"ok": True, "lon": pt.lon, "lat": pt.lat}
+    lim = TAKEOFF_OFF_LIMIT_M
+    if not (-lim <= east_m <= MAP_PRINT_W + lim) or \
+       not (-lim <= north_m <= MAP_PRINT_H + lim):
+        raise HTTPException(
+            400,
+            f"이륙 지점이 지도에서 너무 멉니다 — 좌하단 기준 "
+            f"동 {-lim:.1f}~{MAP_PRINT_W + lim:.1f} m, "
+            f"북 {-lim:.1f}~{MAP_PRINT_H + lim:.1f} m 안이어야 합니다")
+    new_takeoff = (east_m, north_m)
+    return {"ok": True, "east_m": east_m, "north_m": north_m}
+
+
+@app.post("/sim/start")
+async def post_sim_start():
+    """[테스트] 낙하 판정이 온 것처럼 시뮬레이션을 시작한다.
+
+    arda-bringup(잭슨) 쪽 신호 없이 우리 쪽만 돌려볼 때 쓴다.
+
+    직접 sim_started 를 True 로 세우지 않고 new_observation 을 넣는다.
+    그러면 simulation_step 의 상승 엣지 처리를 그대로 타므로 파티클 초기화,
+    지도/격자 재구성, 자동 모드 이륙 통보까지 실제 흐름과 똑같이 재현된다.
+    플래그만 뒤집으면 그 중 아무것도 안 일어나서 테스트가 무의미해진다.
+    """
+    global new_observation
+    if sim_started:
+        return {"ok": True, "already_started": True}
+    new_observation = (MAPO_LON, MAPO_LAT)
+    log("[TEST] 수동으로 낙하 판정 모의 — 시뮬레이션 시작")
+    return {"ok": True, "already_started": False}
+
+
+@app.post("/takeoff")
+async def post_takeoff(pt: ObservationIn):
+    """지도를 클릭해 이륙 지점을 지정한다 (Tello 기체 좌표의 원점).
+
+    받은 위경도는 곧바로 좌하단 기준 오프셋으로 바꿔 저장한다 — 절대
+    좌표로 두면 입수 지점이 옮겨갈 때 이륙 지점만 뒤에 남는다.
+    비행 중에 바꾸면 지령 위치 누적이 어긋나므로 거부한다.
+    """
+    return _stage_takeoff(*offset_from_takeoff(pt.lon, pt.lat))
+
+
+@app.post("/takeoff/offset")
+async def post_takeoff_offset(off: TakeoffOffsetIn):
+    """이륙 지점을 숫자로 지정한다 — 지도 좌하단 모서리에서 실물 m.
+
+    설치 당일 바닥에서 줄자로 재는 값을 그대로 넣는 용도.
+    """
+    return _stage_takeoff(off.east_m, off.north_m)
 
 
 @app.post("/takeoff/reset")
 async def post_takeoff_reset():
-    """기본 이륙 지점(지도 동쪽 변 바깥 30cm)으로 되돌린다."""
-    global new_takeoff, takeoff_is_default
-    if drone_api.driver.status()["running"]:
-        raise HTTPException(409, "비행 중에는 이륙 지점을 바꿀 수 없습니다")
-    new_takeoff = default_takeoff()
-    takeoff_is_default = True
-    return {"ok": True}
+    """기본 이륙 지점(지도 좌하단 모서리)으로 되돌린다."""
+    return _stage_takeoff(0.0, 0.0)
 
 
 class MapIn(BaseModel):

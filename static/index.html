@@ -543,7 +543,7 @@
       <div class="tbtn" onclick="zoomAt(0.5)" title="+">＋</div>
       <div class="tbtn" onclick="zoomAt(-0.5)" title="-">－</div>
       <div class="tbtn" id="btn-theme" onclick="toggleTheme()" title="T">☾</div>
-      <div class="tbtn" id="btn-takeoff" onclick="toggleTakeoffPick()" title="클릭 후 지도에서 이륙 지점 선택">🚁 이륙 지점</div>
+      <div class="tbtn" id="btn-takeoff" onclick="toggleTakeoffPick()" title="클릭 후 지도에서 이륙 지점 선택 (지도 좌하단 기준으로 저장)">🚁 이륙 지점</div>
     </div>
 
     <div id="estop" onclick="droneLand()" title="Esc 또는 L">🔴 착륙</div>
@@ -624,6 +624,13 @@
       <div class="card" id="drone-card">
         <h3>드론 수색</h3>
 
+        <!-- [테스트] 잭슨 쪽 신호 없이 우리 쪽만 돌려볼 때.
+             실제 낙하 판정과 같은 경로를 타므로 자동 모드 이륙까지 재현된다. -->
+        <button class="btn" id="btn-simstart" onclick="forceSimStart()"
+          style="margin-bottom:9px" title="POST /report 가 온 것처럼 시뮬레이션을 시작합니다">
+          🧪 낙하 판정 모의 (테스트)</button>
+        <div class="why" id="simstart-why"></div>
+
         <div class="seg">
           <button id="m-dry" class="on" onclick="setMode('dry')">DRY RUN</button>
           <button id="m-real" onclick="setMode('real')">실기체</button>
@@ -631,17 +638,27 @@
         <div class="seg">
           <button id="k-manual" class="on" onclick="setKind('manual')" title="지점을 골라 하나씩 이동. 이동 후에도 떠 있음">수동 이동</button>
           <button id="k-auto" onclick="setKind('auto')" title="TOP1→2→3→복귀 자동 순회 후 착륙">자동 순회</button>
+          <button id="k-track" onclick="setKind('track')"
+            title="낙하 판정이 오는 순간 자동 이륙 → 1순위 확률 좌표를 계속 추종">자동 모드</button>
         </div>
         <button class="btn" id="btn-connect" onclick="droneConnect()">연결</button>
 
-        <div class="stat" style="margin-top:9px;align-items:center">
-          <span>이륙 지점</span>
-          <span class="val" style="display:flex;gap:6px;align-items:center">
-            <span id="d-takeoff" style="font-size:11px">-</span>
-            <button class="btn" style="width:auto;padding:2px 8px;font-size:11px" onclick="resetTakeoff()"
-              title="지도 동쪽 변 바깥 기본 위치로">기본</button>
-          </span>
+        <!-- 이륙 지점 = Tello 기체 좌표의 (0,0). 지도 좌하단 모서리에서 재는
+             값이라 설치 당일 바닥에서 줄자로 그대로 옮겨 적을 수 있다. -->
+        <div class="stat" style="margin-top:9px">
+          <span>이륙 지점</span><span class="val" id="d-takeoff" style="font-size:11px">-</span>
         </div>
+        <div class="params" style="margin-top:2px">
+          <label>동쪽 cm <input type="number" id="tk-e" value="0" step="5"></label>
+          <label>북쪽 cm <input type="number" id="tk-n" value="0" step="5"></label>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <button class="btn" id="tk-apply" onclick="applyTakeoffOffset()">적용</button>
+          <button class="btn" style="flex:0 0 34%" onclick="resetTakeoff()"
+            title="지도 좌하단 모서리(0, 0)로">기본</button>
+        </div>
+        <div class="why" id="tk-why">지도 <b>왼쪽 아래 모서리</b> 기준 실물 거리입니다.
+          툴바의 🚁 로 지도를 직접 찍어도 됩니다.</div>
 
         <div class="stat">
           <span>상태</span><span class="val"><span id="d-phase" class="badge b-grey">idle</span></span>
@@ -674,10 +691,24 @@
           <button class="btn" id="btn-clearpath" style="flex:0 0 26%" onclick="clearDronePath()"
             title="지도에 남은 경로 표시만 지웁니다">지우기</button>
         </div>
+        <!-- 자동 모드 — 버튼을 누르는 순간 무장된다. 이후 사람 손 없이 뜨므로
+             무장 상태를 잊지 않도록 배지를 항상 띄워 둔다. -->
+        <div id="track-ctl" style="margin-top:9px;display:none">
+          <div id="track-badge" class="badge b-grey" style="display:block;text-align:center;padding:6px">
+            대기
+          </div>
+          <div style="display:flex;gap:6px;margin-top:6px">
+            <button class="btn" id="btn-track-clear" onclick="clearDronePath()"
+              title="지도에 남은 경로 표시만 지웁니다">지우기</button>
+          </div>
+          <div class="why" id="track-why"></div>
+        </div>
         <div class="why" id="start-why"></div>
 
         <h3 style="margin-top:11px">이벤트</h3>
         <div id="events">—</div>
+      </div>
+
       </div>
 
       <!-- ── 지도 설정 (드론 미션 좌표 변환의 기준이라 드론 탭에 둔다) ── -->
@@ -966,6 +997,22 @@
       } catch (e) { setText('mp-why', e.message); }
     }
 
+    // 서버가 적용한 이륙 지점을 화면에 반영한다. 지도 클릭(🚁)이나 /takeoff/reset
+    // 으로도 바뀌므로 첫 수신 1회가 아니라 값이 바뀔 때마다 따라가야 한다.
+    // 다만 사용자가 타이핑 중인 칸은 건드리지 않는다.
+    let tkShown = null;
+    function syncTakeoffPanel(m) {
+      const e = Math.round(m.takeoff_off_e * 100);
+      const n = Math.round(m.takeoff_off_n * 100);
+      setText('d-takeoff', `동${e} 북${n} cm (좌하단 기준)`);
+      const key = e + ',' + n;
+      if (key === tkShown) return;
+      tkShown = key;
+      const ie = document.getElementById('tk-e'), inn = document.getElementById('tk-n');
+      if (document.activeElement !== ie) ie.value = e;
+      if (document.activeElement !== inn) inn.value = n;
+    }
+
     // 서버가 실제로 적용한 값을 입력칸에 반영한다 (첫 수신 시 1회)
     let mapInputsSynced = false;
     function syncMapPanel(m) {
@@ -999,6 +1046,23 @@
     }
     function resetTakeoff() {
       postJSON('/takeoff/reset').then(() => showError(null)).catch(e => showError(e.message));
+    }
+    // 숫자 입력으로 지정. 화면은 cm, 서버는 m 로 받는다 — 바닥에서 재는
+    // 단위가 cm 라서 입력만 cm 로 두고 경계에서 한 번 나눈다.
+    const TK_HELP = '지도 <b>왼쪽 아래 모서리</b> 기준 실물 거리입니다. '
+      + '툴바의 🚁 로 지도를 직접 찍어도 됩니다.';
+    async function applyTakeoffOffset() {
+      const btn = document.getElementById('tk-apply');
+      btn.disabled = true;
+      try {
+        await postJSON('/takeoff/offset',
+          { east_m: numVal('tk-e', 0) / 100, north_m: numVal('tk-n', 0) / 100 });
+        setHTML('tk-why', TK_HELP);
+      } catch (e) {
+        setText('tk-why', e.message);
+      } finally {
+        btn.disabled = false;
+      }
     }
 
     canvas.addEventListener('wheel', e => {
@@ -1489,7 +1553,7 @@
         drawStar(ex, ey, 10, C.entry);
         ctx.fillStyle = C.mapText; ctx.font = '10px sans-serif';
         ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-        ctx.fillText('입수 지점 = 드론 원점 (0,0)', ex + 13, ey - 4);
+        ctx.fillText('입수 지점 (탐지 좌표)', ex + 13, ey - 4);
       } else if (s.entry_lon != null) {
         const [ex, ey] = toCanvas(s.entry_lon, s.entry_lat);
         drawStar(ex, ey, 10, C.entry);
@@ -1553,12 +1617,9 @@
       const oh = s.obs_history || [];
       syncMapPanel(s.map);
 
-      // 이륙 지점을 입수 지점 기준 지도 cm 로 표시 (드론 좌표계의 0,0)
-      if (s.map && s.map.takeoff_lon != null) {
-        const m = s.map;
-        const e = (m.takeoff_lon - m.origin_lon) * M_LON / m.scale * 100;
-        const n = (m.takeoff_lat - m.origin_lat) * M_LAT / m.scale * 100;
-        setText('d-takeoff', `동${e.toFixed(0)} 북${n.toFixed(0)} cm`);
+      // 이륙 지점 = 드론 좌표계의 (0,0). 지도 좌하단 모서리 기준 실물 cm.
+      if (s.map && s.map.takeoff_off_e != null) {
+        syncTakeoffPanel(s.map);
       }
 
       setHTML('obs-list', oh.length
@@ -1575,7 +1636,7 @@
         return `<div>${sw} ${t}</div>`;
       };
       setHTML('legend', [
-        row({ c: C.entry }, '입수 지점 / 드론 원점'),
+        row({ c: C.entry }, '입수 지점 (탐지 좌표)'),
         row({ c: C.particle }, '파티클'),
         row({ c: C.stranded }, '육지 도달'),
         row({ c: C.best }, '최고 확률 지점'),
@@ -1597,7 +1658,8 @@
     // 드론 제어
     // ─────────────────────────────────────────────
     let droneMode = 'dry';       // dry | real
-    let droneKind = 'manual';    // manual(지점별 이동) | auto(자동 순회)
+    let droneKind = 'manual';    // manual(지점별 이동) | auto(자동 순회) | track(자동 모드)
+    let simStartedSeen = false;  // 낙하 판정 상승 엣지 감지용
     let droneStatus = null, mission = null, missionErr = null;
     let armTimer = null, armLeft = 0;
 
@@ -1668,8 +1730,9 @@
       if (droneStatus.battery != null && droneStatus.battery < 30)
         return `배터리 부족 (${droneStatus.battery}% / 최소 30%)`;
 
-      // 수동 모드는 이륙만 하면 되므로 미션 유효성까지 볼 필요가 없다
-      if (droneKind === 'manual') return null;
+      // 수동/자동 모드는 이륙만 하면 되므로 미션 유효성까지 볼 필요가 없다.
+      // 자동 모드는 목표가 없어도 일단 뜬 뒤 제자리에서 기다린다.
+      if (droneKind === 'manual' || droneKind === 'track') return null;
 
       if (missionErr) return missionErr;
       if (!mission || !mission.points || !mission.points.length) return '미션 없음 (waypoint 대기 중)';
@@ -1704,13 +1767,86 @@
     }
 
     function setKind(kind) {
-      if (droneStatus && (droneStatus.running || droneStatus.airborne)) return;
+      const st = droneStatus;
+      if (st && (st.running || st.airborne)) {
+        // 비행 중 모드 전환은 '수동으로 넘겨받기' 만 허용한다.
+        // 자율비행 도중 조종을 뺏어야 하는 상황이 실제로 있기 때문이다.
+        // 반대로 수동 -> 자율 전환은 막는다. 떠 있는 기체에 미션을 새로
+        // 밀어넣으면 지령 위치 누적이 어긋난다.
+        if (kind === 'manual' && st.airborne) { takeManual(); }
+        return;
+      }
       droneKind = kind;
-      document.getElementById('k-manual').classList.toggle('on', kind === 'manual');
-      document.getElementById('k-auto').classList.toggle('on', kind === 'auto');
+      ['manual', 'auto', 'track'].forEach(k =>
+        document.getElementById('k-' + k).classList.toggle('on', kind === k));
       disarm();
+      // '자동 모드' 를 고르는 것 자체가 무장이다. 다른 모드로 나가면 해제된다 —
+      // 켜둔 채 잊고 다른 걸 만지다 갑자기 뜨는 상황을 막는다.
+      const want = kind === 'track';
+      if (want !== autoTrackOn) setAutoTrack(want);
       buildLegend();          // 모드마다 경로 심볼이 다르다
       renderDrone(); requestRender();
+    }
+
+    // ── 자율비행 -> 수동 전환 ──
+    // 착륙하지 않고 넘겨받는다. 진행 중인 go 는 취소할 수 없어서(기체가
+    // 응답할 때까지 블로킹) 그 이동이 끝난 뒤에 실제로 넘어온다.
+    async function takeManual() {
+      try {
+        droneStatus = await postJSON('/drone/manual');
+        showError(null);
+        renderDrone();
+      } catch (e) {
+        showError(e.message);
+      }
+    }
+
+    // ── [테스트] 낙하 판정 모의 ──
+    // 서버가 new_observation 경로로 처리하므로 자동 모드 무장 상태면
+    // 이 버튼 하나로 이륙까지 간다. 실기체 모드에서는 진짜로 뜬다.
+    async function forceSimStart() {
+      const btn = document.getElementById('btn-simstart');
+      btn.disabled = true;
+      try {
+        const r = await postJSON('/sim/start');
+        setText('simstart-why', r.already_started
+          ? '이미 시작된 상태입니다 (시뮬 탭의 리셋으로 되돌립니다)' : '');
+      } catch (e) {
+        setText('simstart-why', e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // ── 자동 모드 (탐지 확정 → 자동 이륙 → 1순위 좌표 추종) ──
+    let autoTrackOn = false;
+    async function setAutoTrack(on) {
+      try {
+        await postJSON('/drone/autotrack', {
+          enabled: on, speed: speedVal(), threshold_cm: 20.0, max_sec: 180.0,
+        });
+        autoTrackOn = on;
+        setText('track-why', '');
+      } catch (e) {
+        autoTrackOn = false;            // 실패했으면 무장된 척하지 않는다
+        setText('track-why', e.message);
+      }
+      renderDrone();
+    }
+
+    // 새로고침해도 서버의 무장 상태를 따라간다. 브라우저만 다시 뜬 건데
+    // 화면이 '해제' 로 보이면 무장된 줄 모르고 신호를 쏘게 된다.
+    async function initAutoTrack() {
+      try {
+        const a = await api('/drone/autotrack');
+        if (a && a.enabled) {
+          autoTrackOn = true;
+          droneKind = 'track';
+          ['manual', 'auto', 'track'].forEach(k =>
+            document.getElementById('k-' + k).classList.toggle('on', k === 'track'));
+          buildLegend(); renderDrone(); requestRender();
+        }
+      } catch (e) { /* 서버가 아직이면 그냥 해제 상태로 둔다 */ }
     }
 
     // ── 수동 이동 ──
@@ -1777,6 +1913,8 @@
     const PHASE_BADGE = {
       idle: 'b-grey', connecting: 'b-amber', ready: 'b-blue',
       takeoff: 'b-green', flying: 'b-green', landing: 'b-amber', error: 'b-red',
+      // 자동 모드: 이륙은 했는데 아직 1순위 좌표가 없어 제자리에 떠 있는 상태
+      hovering: 'b-green',
     };
     const RESULT_BADGE = {
       completed: 'b-green', aborted: 'b-amber', incomplete: 'b-amber', error: 'b-red',
@@ -1789,12 +1927,19 @@
     function renderDrone() {
       const st = droneStatus;
 
+      // [테스트] 낙하 판정 모의 — 이미 시작됐으면 눌러도 아무 일도 안 한다
+      const simOn = !!(state && state.sim_started);
+      const sb = document.getElementById('btn-simstart');
+      sb.disabled = simOn;
+      sb.textContent = simOn ? '🧪 시뮬레이션 진행 중' : '🧪 낙하 판정 모의 (테스트)';
+      if (simOn) setText('simstart-why', '');
+
       // 상태
       const phase = st ? st.phase : 'idle';
       const pe = document.getElementById('d-phase');
       pe.textContent = phase + (st && st.dry_run === false ? ' · 실기체' : '');
       pe.className = 'badge ' + (PHASE_BADGE[phase] || 'b-grey')
-        + (phase === 'flying' || phase === 'takeoff' ? ' pulsing' : '');
+        + (['flying', 'takeoff', 'hovering'].includes(phase) ? ' pulsing' : '');
 
       const batt = st && st.battery != null ? st.battery : null;
       setText('d-batt', batt != null ? batt + '%' : '-');
@@ -1854,14 +1999,45 @@
       }
 
       // 모드별 컨트롤 전환
-      const manual = droneKind === 'manual';
-      document.getElementById('btn-start').style.display = manual ? 'none' : '';
+      const manual = droneKind === 'manual', track = droneKind === 'track';
+      document.getElementById('btn-start').style.display = (manual || track) ? 'none' : '';
       document.getElementById('manual-ctl').style.display = manual ? 'flex' : 'none';
+      document.getElementById('track-ctl').style.display = track ? 'block' : 'none';
 
       const why = startBlocker();
       const env = droneMode === 'real' ? '실기체' : 'DRY RUN';
 
-      if (manual) {
+
+      if (track) {
+        // 무장돼 있다는 사실 자체를 크게 보여준다. 여기서 손을 떼면
+        // 다음 낙하 판정에 사람 개입 없이 프로펠러가 돈다.
+        const b = document.getElementById('track-badge');
+        const started = !!(state && state.sim_started);
+        let txt, cls;
+        // 순서 주의: 떠 있으면 비행 상태를 먼저 보여준다. startBlocker() 는
+        // 비행 중이면 '명령 수행 중' 을 돌려주는데, 그걸 먼저 보면 정작
+        // 추적 중일 때 '무장 불가' 가 뜬다.
+        if (!autoTrackOn)          { txt = '해제됨'; cls = 'b-grey'; }
+        else if (st && st.airborne) {
+          // 대기 중에는 제자리 회전으로 "수색 중"을 표현한다. 회전이 꺼졌으면
+          // (기수 오차 누적) 그 사실이 배지에 드러나야 한다 — 조용히 멈추면
+          // 왜 안 도는지 알 길이 없다.
+          const spin = st.spins ? ` · ${st.spins}회전` : '';
+          const off  = st.spin_ok === false ? ' · 회전 중단(기수오차)' : '';
+          txt = st.phase === 'hovering'
+            ? `수색 대기 중 — 1순위 좌표 기다림${spin}${off}`
+            : `추적 중 — 1순위 좌표 추종${spin}${off}`;
+          cls = 'b-green pulsing';
+        }
+        else if (why)              { txt = `무장 불가 — ${why}`; cls = 'b-red'; }
+        else if (started)          { txt = '탐지 확정됨 — 이륙 준비'; cls = 'b-amber'; }
+        else                       { txt = `무장 (${env}) — 낙하 판정 시 자동 이륙`; cls = 'b-blue'; }
+        b.textContent = txt;
+        b.className = 'badge ' + cls;
+        document.getElementById('btn-track-clear').disabled =
+          !(st && st.path && st.path.length > 1);
+        setText('start-why', '');
+      } else if (manual) {
         // btn-launch = 수동 이륙 버튼. 툴바의 btn-takeoff(이륙 지점 지정)와 다른 것이다.
         const tk = document.getElementById('btn-launch');
         const airborne = !!(st && st.airborne);
@@ -1883,6 +2059,13 @@
         setText('start-why', why || '');
       }
 
+      // 인계 대기: go 는 중간에 끊을 수 없어서 몇 초 걸릴 수 있다. 아무 표시도
+      // 없으면 눌린 건지 알 수 없다. 모드별 분기가 start-why 를 덮으므로
+      // 반드시 그 뒤에서 다시 쓴다.
+      if (st && st.handover) {
+        setText('start-why', '수동 전환 대기 중 — 진행 중인 이동이 끝나면 넘어갑니다');
+      }
+
       // 이벤트 로그
       const ev = st && st.events && st.events.length ? st.events.join('\n') : '—';
       const box = document.getElementById('events');
@@ -1893,6 +2076,15 @@
         const el = document.getElementById(i);
         if (el) el.disabled = busy;
       });
+
+      // 비행 중 모드 세그먼트: '수동 이동' 만 살려둔다 (조종 인계용).
+      const flying = !!(st && (st.running || st.airborne));
+      const km = document.getElementById('k-manual');
+      km.disabled = flying && droneKind === 'manual';
+      km.textContent = (flying && droneKind !== 'manual') ? '수동으로 넘겨받기' : '수동 이동';
+      ['k-auto', 'k-track'].forEach(i => {
+        document.getElementById(i).disabled = flying;
+      });
     }
 
     // ── 폴링 ──
@@ -1901,6 +2093,16 @@
       try {
         droneStatus = await api('/drone/status');
         wait = (droneStatus.connected || droneStatus.running) ? 500 : 2000;
+        // 인계가 끝나면 서버 쪽 mode 가 manual 로 바뀐다. 화면 세그먼트도
+        // 따라가야 이동 버튼이 열린다.
+        if (droneStatus.mode === 'manual' && droneKind !== 'manual'
+            && !droneStatus.running) {
+          droneKind = 'manual';
+          ['manual', 'auto', 'track'].forEach(k =>
+            document.getElementById('k-' + k).classList.toggle('on', k === 'manual'));
+          if (autoTrackOn) setAutoTrack(false);
+          buildLegend(); requestRender();
+        }
         renderDrone();
         if (droneStatus.running) requestRender();
       } catch (e) {
@@ -1909,10 +2111,18 @@
       setTimeout(pollStatus, wait);
     }
 
+    // 미션을 갱신하지 말아야 하는가.
+    // 자동 순회는 시작 시점 스냅샷을 레그 단위로 실행하므로 비행 중 덮어쓰면
+    // 실행 중인 경로와 화면이 어긋난다. 반면 자동 모드(추적)는 고정된 미션이
+    // 없고, 오히려 2·3순위가 계속 갱신돼야 수동으로 넘겨받은 직후 바로 그
+    // 지점으로 보낼 수 있다.
+    function missionFrozen() {
+      return !!(droneStatus && droneStatus.running && droneKind === 'auto');
+    }
+
     async function pollMission() {
       try {
-        // 비행 중에는 미션이 스냅샷으로 고정돼 있으므로 덮어쓰지 않는다
-        if (!(droneStatus && droneStatus.running)) {
+        if (!missionFrozen()) {
           mission = await api(`/mission?top_n=${topN()}`);
           missionErr = null;
         }
@@ -2044,7 +2254,12 @@
         let d;
         try { d = JSON.parse(e.data); } catch (_) { return; }
         if (!d || d.elapsed_sec === undefined) return;   // 첫 프레임은 {} 일 수 있다
+        const wasStarted = simStartedSeen;
         state = d;
+        simStartedSeen = !!d.sim_started;
+        // 자동 모드 배지와 모의 버튼이 낙하 판정을 즉시 반영해야 한다.
+        // 상태 폴링(최대 2초)만 기다리면 "이미 떴는데 화면은 대기 중" 구간이 생긴다.
+        if (wasStarted !== simStartedSeen) renderDrone();
         updateSimCard(d);
         updateThermalCard(d);
         updateScale(d);                                  // 스케일은 수신 시에만 갱신
@@ -2066,6 +2281,7 @@
     connect();
     pollStatus();
     pollMission();
+    initAutoTrack();      // 서버가 이미 무장돼 있으면 화면을 거기에 맞춘다
   </script>
 
   <!-- 열화상 확대 보기 -->
@@ -2076,6 +2292,7 @@
       <button id="thermal-close" onclick="closeThermal()">닫기 (Esc)</button>
     </div>
   </div>
+
 
   <script>
     // 열화상 확대. 원본 img 의 src 를 그대로 재사용하므로 추가 수신이 없다.

@@ -7,6 +7,8 @@ hanriver.py 를 import 하지 않는다. 순환 import 를 피하려고
 상태 조회 함수를 주입받는 구조로 만들었다.
 """
 
+import time
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -29,6 +31,19 @@ class GotoIn(BaseModel):
     lat:   float
     speed: int = Field(30, ge=10, le=100)
     label: str = ""
+
+
+class TrackIn(BaseModel):
+    speed:        int   = Field(30,    ge=10,  le=100)
+    # Tello 는 20cm 미만 이동을 거부한다. 이게 하한이고, 목표를 평활해뒀으므로
+    # 여기까지 낮춰도 잡음을 쫓지 않는다.
+    threshold_cm: float = Field(20.0,  ge=20.0, le=200.0)
+    max_sec:      float = Field(180.0, ge=10.0, le=600.0)
+
+
+class AutoTrackIn(TrackIn):
+    """탐지 확정(sim_started) 시 자동으로 추적을 시작할지."""
+    enabled: bool = True
 
 
 class StartIn(BaseModel):
@@ -162,6 +177,164 @@ async def drone_home(speed: int = Query(30, ge=10, le=100)):
     """이륙 지점(기체 좌표 0,0)으로 돌아간다. 착륙은 하지 않는다."""
     try:
         return driver.manual_goto(0.0, 0.0, speed=speed, label="이륙 지점 복귀")
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+
+# ── 추적 모드 ──
+# 확률 1순위 좌표를 계속 쫓아간다. 탐지 확정 시 자동 시작도 지원한다.
+#
+# 목표 평활 계수. 1.0 = 평활 없음 = 현재 1순위 좌표를 그대로 추종.
+#
+# 예전에는 0.25(시정수 약 8초)를 썼다. 1:150 축척에서는 격자 한 칸이 종이
+# 위 10cm 여서 argmax 가 한두 칸만 튀어도 이동 임계값 20cm 를 넘겨버렸기
+# 때문이다. 지금은 1:1100 이라 한 칸이 3.6cm 이고, 20cm 를 넘으려면 5칸
+# 넘게 튀어야 한다 — 임계값 자체가 잡음을 걸러준다.
+#
+# 그래서 평활은 지연만 남기게 됐다. 끄면 "지금 1순위" 를 곧바로 쫓는다.
+# 만약 확률이 비슷한 두 봉우리 사이에서 1순위가 왕복해 드론이 오간다면,
+# 이 값을 0.3~0.5 로 낮추거나 TrackIn.threshold_cm 을 올리면 된다.
+TRACK_EMA_ALPHA = 1.0
+
+_autotrack = {"enabled": False, "speed": 30, "threshold_cm": 20.0, "max_sec": 180.0}
+
+
+def _track_fns():
+    """추적에 쓸 목표/경계 판정 함수를 만든다.
+
+    목표는 waypoints[0] — NMS 가 최고 확률 칸을 항상 먼저 채택하므로
+    이게 곧 '확률 1순위 좌표'다.
+
+    TRACK_EMA_ALPHA=1.0 이면 평활 없이 현재 1순위를 그대로 쫓는다.
+    격자 이산화 잡음은 이동 임계값(20cm)이 걸러준다 — 자세한 근거는
+    TRACK_EMA_ALPHA 주석 참조.
+    """
+    sm = {"x": None, "y": None}     # 추적 1회분 평활 상태
+
+    def target_fn():
+        st = _get_state() if _get_state else None
+        if not st or not st.get("map") or not st.get("waypoints"):
+            return None
+        wp = st["waypoints"][0]
+        m  = st["map"]
+        te, tn   = geo_to_enu(wp["lon"], wp["lat"], m["takeoff_lon"], m["takeoff_lat"])
+        tem, tnm = enu_to_map(te, tn, m["scale"])
+        x, y = map_to_tello_cm(tem, tnm)
+
+        if sm["x"] is None:
+            sm["x"], sm["y"] = x, y
+        else:
+            sm["x"] += (x - sm["x"]) * TRACK_EMA_ALPHA
+            sm["y"] += (y - sm["y"]) * TRACK_EMA_ALPHA
+        return sm["x"], sm["y"]
+
+    def bounds_fn(x_cm, y_cm):
+        st = _get_state() if _get_state else None
+        if not st or not st.get("map"):
+            return False
+        m = st["map"]
+        margin = (m["lon_max"] - m["origin_lon"]) * M_PER_DEG_LON / m["scale"]
+        # 기체 좌표(이륙점 기준) -> 지도 좌표(입수점 기준) 로 되돌려 판정
+        east_t, north_t = -y_cm / 100.0, x_cm / 100.0
+        de, dn = geo_to_enu(m["takeoff_lon"], m["takeoff_lat"],
+                            m["origin_lon"], m["origin_lat"])
+        dem, dnm = enu_to_map(de, dn, m["scale"])
+        return in_map_bounds(east_t + dem, north_t + dnm,
+                             m["width_m"], m["height_m"], margin)
+
+    return target_fn, bounds_fn
+
+
+@router.post("/drone/track")
+async def drone_track(body: TrackIn):
+    """확률 1순위 좌표를 계속 따라간다. 이륙부터 착륙까지 자동."""
+    if _get_state is None:
+        raise HTTPException(503, "상태 제공자가 등록되지 않았습니다")
+    target_fn, bounds_fn = _track_fns()
+    try:
+        return driver.start_tracking(target_fn, bounds_fn, speed=body.speed,
+                                     threshold_cm=body.threshold_cm,
+                                     max_sec=body.max_sec)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+
+@router.post("/drone/autotrack")
+async def drone_autotrack(body: AutoTrackIn):
+    """탐지 확정 시 자동으로 이륙+추적을 시작할지 설정한다."""
+    _autotrack.update(enabled=body.enabled, speed=body.speed,
+                      threshold_cm=body.threshold_cm, max_sec=body.max_sec)
+    return {"ok": True, **_autotrack}
+
+
+@router.get("/drone/autotrack")
+async def drone_autotrack_get():
+    return dict(_autotrack)
+
+
+# 탐지 확정 즉시 이륙한다. 1순위 좌표는 아직 없어도 되고,
+# 생기면 드라이버가 알아서 추종을 시작한다.
+# 기체가 아직 연결 안 됐을 때만 잠깐 대기한다.
+_pending_until = 0.0
+AUTOTRACK_WAIT_SEC = 60.0
+
+
+def _try_start_track():
+    """조건이 되면 추적을 시작한다. 성공 여부를 반환."""
+    s = driver.status()
+    if s["running"] or s["airborne"]:
+        return True                 # 이미 떠 있으면 관여하지 않는다
+    if not s["connected"]:
+        return False
+    target_fn, bounds_fn = _track_fns()
+    try:
+        driver.start_tracking(target_fn, bounds_fn,
+                              speed=_autotrack["speed"],
+                              threshold_cm=_autotrack["threshold_cm"],
+                              max_sec=_autotrack["max_sec"])
+        return True
+    except Exception as e:
+        driver._ev(f"[자동추적] 시작 실패 - {type(e).__name__}: {e}")
+        return True                 # 재시도하지 않는다 (배터리 부족 등)
+
+
+def notify_sim_started():
+    """hanriver 가 sim_started 를 False→True 로 올릴 때 호출한다.
+
+    실패해도 시뮬레이션은 계속 돌아야 하므로 예외를 밖으로 내보내지 않는다.
+    """
+    global _pending_until
+    if not _autotrack["enabled"]:
+        return
+    driver._ev("[자동추적] 탐지 확정 - 이륙")
+    if not _try_start_track():
+        # 기체 미연결. 연결되면 바로 뜨도록 잠깐 기다린다.
+        _pending_until = time.time() + AUTOTRACK_WAIT_SEC
+        driver._ev(f"[자동추적] 기체 미연결 - {AUTOTRACK_WAIT_SEC:.0f}초 안에 연결되면 이륙")
+
+
+def tick_autotrack():
+    """시뮬 스텝마다 호출된다. 연결 대기 중일 때만 일을 한다."""
+    global _pending_until
+    if not _pending_until or not _autotrack["enabled"]:
+        return
+    if time.time() > _pending_until:
+        _pending_until = 0.0
+        driver._ev("[자동추적] 기체가 연결되지 않아 취소")
+        return
+    if _try_start_track():
+        _pending_until = 0.0
+
+
+@router.post("/drone/manual")
+async def drone_manual():
+    """자율비행 중 수동 조종으로 전환한다 (착륙하지 않음).
+
+    진행 중인 이동이 끝나야 실제로 넘어가므로, 응답의 handover 가 true 면
+    아직 전환 대기 중이다. status 를 폴링해서 mode=="manual" 이 되면 완료.
+    """
+    try:
+        return driver.take_manual()
     except RuntimeError as e:
         raise HTTPException(409, str(e))
 
