@@ -55,12 +55,28 @@
       position: relative;
     }
 
+    #navermap {
+      position: absolute;
+      inset: 0;
+      /* 네이버 Map 생성자가 컨테이너의 position 을 relative 로 덮어쓴다.
+         그러면 inset:0 이 크기가 아니라 오프셋이 되어 높이가 auto(=0) 로
+         무너진다 (실측: bounds 위도 범위 0, zoom 6). 크기를 직접 준다. */
+      width: 100%;
+      height: 100%;
+      z-index: 0;
+    }
     canvas {
+      position: absolute;
+      inset: 0;
       width: 100%;
       height: 100%;
       display: block;
       cursor: crosshair;
+      z-index: 1;
     }
+    /* 네이버 지도가 살아 있으면 뷰 조작(드래그·줌)은 지도가 담당한다.
+       캔버스는 그림만 얹고 포인터 이벤트를 통과시킨다. */
+    body.navermap-on canvas { pointer-events: none; }
 
     #toolbar {
       position: absolute;
@@ -534,22 +550,33 @@
 <body>
 
   <div id="canvas-wrap">
+    <!-- 네이버 지도. 캔버스 뒤에 깔리고, 투영의 기준이 된다.
+         키가 없거나 로드에 실패하면 비어 있는 채로 남고 캔버스가 자체
+         투영 + 오프라인 배경 사진으로 폴백한다. -->
+    <div id="navermap"></div>
     <canvas id="c"></canvas>
 
     <div id="toolbar">
-      <div class="tbtn" id="btn-reset" onclick="resetView()" title="R">🏠 전체</div>
-      <div class="tbtn" id="btn-map" onclick="fitToMap()" title="M">🗺 지도 영역</div>
-      <div class="tbtn" id="btn-follow" onclick="toggleFollow()" title="F">📍 따라가기</div>
-      <div class="tbtn" onclick="zoomAt(0.5)" title="+">＋</div>
-      <div class="tbtn" onclick="zoomAt(-0.5)" title="-">－</div>
+      <div class="tbtn view-ctl" id="btn-reset" onclick="resetView()" title="R">🏠 전체</div>
+      <div class="tbtn view-ctl" id="btn-map" onclick="fitToMap()" title="M">🗺 지도 영역</div>
+      <div class="tbtn view-ctl" id="btn-follow" onclick="toggleFollow()" title="F">📍 따라가기</div>
+      <div class="tbtn view-ctl" onclick="zoomAt(0.5)" title="+">＋</div>
+      <div class="tbtn view-ctl" onclick="zoomAt(-0.5)" title="-">－</div>
       <div class="tbtn" id="btn-theme" onclick="toggleTheme()" title="T">☾</div>
+      <div class="tbtn" id="btn-obs" onclick="toggleObsPick()"
+        title="누른 뒤 지도를 클릭하면 그 지점을 관측값으로 넣습니다">📍 관측값 입력</div>
       <div class="tbtn" id="btn-takeoff" onclick="toggleTakeoffPick()" title="클릭 후 지도에서 이륙 지점 선택 (지도 좌하단 기준으로 저장)">🚁 이륙 지점</div>
+      <!-- 현재 배경이 네이버인지 오프라인 사진인지. 시연 중 정합이 이상하면
+           여기부터 봐야 하므로 눈에 보이는 곳에 둔다. -->
+      <div class="tbtn view-ctl" id="btn-grab" onclick="grabViewAsMap()"
+        title="지금 화면에 보이는 범위를 실물 지도 영역으로 잡습니다">⬚ 화면을 지도 영역으로</div>
+      <div class="tbtn" id="map-mode" title="배경 지도 출처">지도: 확인 중</div>
     </div>
 
     <div id="estop" onclick="droneLand()" title="Esc 또는 L">🔴 착륙</div>
 
     <div id="coords">lat — lon —</div>
-    <div id="hint">드래그: 이동 &nbsp;|&nbsp; 스크롤: 줌 &nbsp;|&nbsp; 클릭: 관측값 입력</div>
+    <div id="hint">드래그: 이동 &nbsp;|&nbsp; 스크롤: 줌 &nbsp;|&nbsp; 관측값은 📍 버튼을 누른 뒤 클릭</div>
   </div>
 
   <div id="panel">
@@ -667,6 +694,10 @@
         <div class="bar"><i id="d-batt-bar" style="width:0%"></i></div>
         <div class="stat"><span>진행</span><span class="val" id="d-leg">-</span></div>
         <div class="bar"><i id="d-leg-bar" style="width:0%"></i></div>
+        <!-- 드론에 실제로 넘어간 좌표. 지도 위 표식과 같은 값을 숫자로도 본다. -->
+        <div class="stat" id="d-target-row" style="display:none">
+          <span>전송 좌표</span><span class="val" id="d-target" style="font-size:11px">-</span>
+        </div>
         <div class="stat" id="d-result-row" style="display:none">
           <span>종료</span><span class="val"><span id="d-result" class="badge b-grey"></span></span>
         </div>
@@ -724,6 +755,32 @@
             <input type="number" id="mp-e" value="151.8" min="0" max="5000" step="10"></label>
           <label>남쪽 여유 m (입수 지점 기준)
             <input type="number" id="mp-so" value="91.4" min="0" max="5000" step="10"></label>
+        </div>
+        <div class="params" style="margin-top:0">
+          <label>덮는 실제 가로 km
+            <input type="number" id="mp-km" value="2.7" min="0.05" max="20" step="0.1"></label>
+        </div>
+        <!-- 지도 영역 조정: 잠금을 잠깐 풀고 눈으로 맞춘 뒤 확정한다.
+             평소에는 시점이 고정이라 화면과 바닥 인쇄물이 어긋나지 않는다. -->
+        <button class="btn" id="mp-adjust" onclick="toggleMapAdjust()"
+          style="margin-top:8px">🔓 지도 영역 조정</button>
+        <div id="mp-adjust-ctl" style="display:none;margin-top:6px">
+          <div style="display:flex;gap:4px;align-items:center">
+            <span style="font-size:11px;color:var(--text-dim);flex:1" id="mp-view">화면 범위 -</span>
+            <button class="btn" style="width:auto;padding:2px 11px" onclick="mapZoom(1)">＋</button>
+            <button class="btn" style="width:auto;padding:2px 11px" onclick="mapZoom(-1)">－</button>
+          </div>
+          <div class="why" style="margin-top:4px">지도를 끌고 줌해서 맞춘 뒤 <b>확정</b>을 누르세요</div>
+        </div>
+
+        <!-- 지도 영역 밀기. 한 번에 가로/세로의 10%씩 움직인다.
+             east_m/south_m 을 직접 계산하지 않고도 자리를 맞출 수 있다. -->
+        <div style="display:flex;gap:4px;margin-top:6px;align-items:center">
+          <span style="font-size:11px;color:var(--text-dim);flex:1">영역 밀기</span>
+          <button class="btn" style="width:auto;padding:2px 9px" onclick="nudgeMap(-1,0)" title="서쪽으로">←</button>
+          <button class="btn" style="width:auto;padding:2px 9px" onclick="nudgeMap(0,1)" title="북쪽으로">↑</button>
+          <button class="btn" style="width:auto;padding:2px 9px" onclick="nudgeMap(0,-1)" title="남쪽으로">↓</button>
+          <button class="btn" style="width:auto;padding:2px 9px" onclick="nudgeMap(1,0)" title="동쪽으로">→</button>
         </div>
         <div class="stat" id="mp-info"></div>
         <div style="display:flex;gap:6px;margin-top:6px">
@@ -830,7 +887,7 @@
     // 서버의 state.bounds 가 오면 교체된다. 첫 프레임 전 부트스트랩 값.
     let INIT = { lonMin: 126.900, lonMax: 126.918, latMin: 37.537, latMax: 37.546 };
     let view = { ...INIT };
-    let boundsAdopted = false, mapFitted = false;
+    let boundsAdopted = false, mapFitted = false, lastMapKey = '';
 
     let W = 1, H = 1;
     let state = null, autoFollow = false;
@@ -846,9 +903,39 @@
 
     // 경도 1° 와 위도 1° 의 실제 길이가 다르므로(88km vs 111km) 화면에도 그 비율을
     // 반영해야 실물 지도 사각형이 정확한 3:2 로 보인다.
+    // ── 투영 ──────────────────────────────────────
+    // 위경도 <-> 캔버스 픽셀 변환을 누가 소유하는가.
+    //
+    //   naverMap 이 살아 있으면  : 네이버(Web Mercator)가 기준.
+    //     지도 사각형이 자기 위경도가 찍히는 픽셀에 자동으로 놓이므로,
+    //     배경과 파티클·waypoint 정합을 손으로 맞출 일이 없다.
+    //   없으면(키 없음/오프라인) : 아래 등장방형 근사로 폴백.
+    //     mapomap.jpg 를 지도 사각형에 늘려 채우던 기존 동작 그대로.
+    //
+    // 그리기 함수들은 toCanvas/fromCanvas 만 쓰므로 이 분기를 모른다.
+    // ── 투영 ──────────────────────────────────────
+    // 위경도 <-> 캔버스 픽셀 변환을 누가 소유하는가.
+    //
+    //   naverMap 이 살아 있으면  : 네이버가 기준. 지도 사각형이 자기 위경도가
+    //     찍히는 픽셀에 자동으로 놓이므로 정합을 손으로 맞출 일이 없다.
+    //   없으면(키 없음/오프라인) : 아래 등장방형 근사로 폴백.
+    //
+    // 네이버 좌표를 점마다 부르지는 않는다. 히트맵만 격자 4천 칸 x 2회라
+    // 프레임당 8천 번인데, 그때마다 LatLng 객체를 만들면 버벅인다.
+    // 대신 프레임당 3점만 물어보고 아핀 변환을 맞춘 뒤, 나머지는 순수 산술로
+    // 푼다. 네이버 기본 투영이 UTMK(횡축 메르카토르)라 경도->x 가 선형이
+    // 아니고 격자 수렴각만큼 살짝 돌아가 있는데, 아핀은 회전까지 담으므로
+    // 화면 범위에서는 오차가 픽셀 아래다.
     const proj = { lon0: 0, lat0: 0, mx: 1, my: 1 };
+    // 아핀 계수: [x,y] = [x0,y0] + M * [lon-lon0, lat-lat0]
+    const aff = { ok: false, lon0: 0, lat0: 0, x0: 0, y0: 0,
+                  xLon: 1, xLat: 0, yLon: 0, yLat: 1, det: 1 };
+    let naverMap = null;          // naver.maps.Map (없으면 폴백)
+    let affWarned = false;
 
     function updateProjection() {
+      if (naverMap && fitAffine()) return;
+      aff.ok = false;
       const spanE = (view.lonMax - view.lonMin) * M_LON;
       const spanN = (view.latMax - view.latMin) * M_LAT;
       const ppm = Math.min(W / spanE, H / spanN);   // 요청 영역이 다 들어가도록
@@ -857,14 +944,77 @@
       proj.lon0 = (view.lonMin + view.lonMax) / 2 - (W / 2) / proj.mx;
       proj.lat0 = (view.latMin + view.latMax) / 2 - (H / 2) / proj.my;
     }
+
+    // 네이버 투영을 3점 샘플해 아핀 계수를 맞춘다. 성공하면 true.
+    function fitAffine() {
+      try {
+        const pr = naverMap.getProjection();
+        const b  = naverMap.getBounds();
+        if (!pr || !b) return false;
+        const sw = b.getSW(), ne = b.getNE();
+        const dLon = ne.lng() - sw.lng(), dLat = ne.lat() - sw.lat();
+        if (!(Math.abs(dLon) > 1e-12 && Math.abs(dLat) > 1e-12)) return false;
+
+        const at = (lat, lng) => pr.fromCoordToOffset(new naver.maps.LatLng(lat, lng));
+        const p0 = at(sw.lat(), sw.lng());
+        const p1 = at(sw.lat(), ne.lng());     // 경도만 변화
+        const p2 = at(ne.lat(), sw.lng());     // 위도만 변화
+
+        aff.lon0 = sw.lng(); aff.lat0 = sw.lat();
+        aff.x0 = p0.x;       aff.y0 = p0.y;
+        aff.xLon = (p1.x - p0.x) / dLon;  aff.xLat = (p2.x - p0.x) / dLat;
+        aff.yLon = (p1.y - p0.y) / dLon;  aff.yLat = (p2.y - p0.y) / dLat;
+        aff.det  = aff.xLon * aff.yLat - aff.xLat * aff.yLon;
+        if (!isFinite(aff.det) || Math.abs(aff.det) < 1e-12) return false;
+
+        // 자기 검증: 지도 중심은 캔버스 한가운데에 찍혀야 한다.
+        // fromCoordToOffset 이 컨테이너 기준이 아니면 여기서 크게 어긋난다.
+        aff.ok = true;
+        const c = naverMap.getCenter();
+        const [cx, cy] = toCanvas(c.lng(), c.lat());
+        if (Math.abs(cx - W / 2) > 4 || Math.abs(cy - H / 2) > 4) {
+          aff.ok = false;
+          if (!affWarned) {
+            affWarned = true;
+            console.warn('네이버 투영 정합 실패 — 중심이 ' +
+              `(${cx.toFixed(0)}, ${cy.toFixed(0)}) 로 나옴 (기대 ` +
+              `${(W / 2).toFixed(0)}, ${(H / 2).toFixed(0)}). 폴백 투영을 씁니다.`);
+          }
+          return false;
+        }
+        return true;
+      } catch (e) {
+        if (!affWarned) { affWarned = true; console.warn('네이버 투영 오류:', e.message); }
+        return false;
+      }
+    }
+
     function toCanvas(lon, lat) {
+      if (aff.ok) {
+        const dl = lon - aff.lon0, dt = lat - aff.lat0;
+        return [aff.x0 + aff.xLon * dl + aff.xLat * dt,
+                aff.y0 + aff.yLon * dl + aff.yLat * dt];
+      }
       return [(lon - proj.lon0) * proj.mx, H - (lat - proj.lat0) * proj.my];
     }
     function fromCanvas(px, py) {
+      if (aff.ok) {
+        const dx = px - aff.x0, dy = py - aff.y0;
+        return { lon: aff.lon0 + ( aff.yLat * dx - aff.xLat * dy) / aff.det,
+                 lat: aff.lat0 + (-aff.yLon * dx + aff.xLon * dy) / aff.det };
+      }
       return { lon: proj.lon0 + px / proj.mx, lat: proj.lat0 + (H - py) / proj.my };
     }
+
     function setView(lonMin, lonMax, latMin, latMax) {
       view = { lonMin, lonMax, latMin, latMax };
+      // 지도 모드에서는 뷰의 주인이 네이버다. view 는 폴백용으로만 갱신하고
+      // 실제 화면은 지도를 움직여서 맞춘다.
+      if (naverMap) {
+        naverMap.fitBounds(new naver.maps.LatLngBounds(
+          new naver.maps.LatLng(latMin, lonMin),
+          new naver.maps.LatLng(latMax, lonMax)));
+      }
       updateProjection();
     }
 
@@ -877,7 +1027,10 @@
     function fitToMap() {
       const m = state && state.map;
       if (!m) return;
-      const padL = (m.lon_max - m.lon_min) * 0.15, padT = (m.lat_max - m.lat_min) * 0.15;
+      // 지도 모드에서는 실물 지도 영역이 화면을 꽉 채워야 한다. 파선 테두리가
+      // 잘리지 않을 만큼만 남긴다. 폴백 모드는 예전처럼 여유를 둔다.
+      const f = naverMap ? 0.01 : 0.15;
+      const padL = (m.lon_max - m.lon_min) * f, padT = (m.lat_max - m.lat_min) * f;
       setView(m.lon_min - padL, m.lon_max + padL, m.lat_min - padT, m.lat_max + padT);
       autoFollow = false;
       document.getElementById('btn-follow').classList.remove('active');
@@ -889,6 +1042,7 @@
       requestRender();
     }
     function zoomAt(deltaZ, cx, cy) {
+      if (naverMap) return;   // 시점 고정 — 영역은 '실물 지도' 카드에서 바꾼다
       const factor = Math.pow(2, -deltaZ * 0.8);
       const p = (cx !== undefined) ? fromCanvas(cx, cy)
         : { lon: (view.lonMin + view.lonMax) / 2, lat: (view.latMin + view.latMax) / 2 };
@@ -958,7 +1112,162 @@
 
       const [px, py] = canvasPos(e);
       const { lon, lat } = fromCanvas(px, py);
+      onMapPick(lon, lat);
+    });
 
+    // 지금 화면에 보이는 범위를 실물 지도 영역으로 삼는다.
+    //
+    // 예전에는 캡처 픽셀을 눈으로 재서 축척을 추정했는데 매번 틀렸다.
+    // 지도가 자기 bounds 를 알려주므로 그걸 그대로 쓰면 추정이 사라진다.
+    //
+    // 인쇄물 비율(가로:세로)은 고정이고 화면 비율은 제각각이라, 보이는 범위를
+    // "전부 담는" 쪽으로 맞춘다. 화면보다 조금 넓게 잡힐 수는 있어도 보이던
+    // 게 잘려 나가지는 않는다.
+    // 지금 화면을 잡으면 어떤 축척이 되는지 버튼에 미리 보여준다.
+    function updateGrabLabel() {
+      const el = document.getElementById('btn-grab');
+      if (!el) return;
+      if (!naverMap || !state || !state.map) { el.textContent = '⬚ 화면을 지도 영역으로'; return; }
+      const b = naverMap.getBounds(), sw = b.getSW(), ne = b.getNE();
+      const vw = (ne.lng() - sw.lng()) * M_LON, vh = (ne.lat() - sw.lat()) * M_LAT;
+      const pw = numVal('mp-w', state.map.width_m), ph = numVal('mp-h', state.map.height_m);
+      const sc = Math.ceil(Math.max(vw / pw, vh / ph));
+      el.textContent = `⬚ 화면을 지도 영역으로  (지금: 1:${sc}, ${(pw * sc / 1000).toFixed(2)}km)`;
+    }
+
+    // 지도 영역 조정 모드.
+    //
+    // 평소에는 시점을 실물 지도 영역에 고정해 둔다 (화면과 바닥 인쇄물이
+    // 어긋나면 알아채기 어렵기 때문). 영역을 다시 잡을 때만 잠깐 풀고,
+    // 눈으로 맞춘 뒤 '확정' 에서 그 화면을 그대로 영역으로 굳힌다.
+    let mapAdjusting = false;
+
+    function setMapAdjust(on) {
+      if (!naverMap) { showError('네이버 지도가 켜져 있을 때만 조정할 수 있습니다'); return; }
+      mapAdjusting = on;
+      naverMap.setOptions({
+        draggable: on, scrollWheel: on, pinchZoom: on, keyboardShortcuts: on,
+        disableDoubleClickZoom: !on, disableDoubleTapZoom: !on, disableKineticPan: !on,
+      });
+      const btn = document.getElementById('mp-adjust');
+      btn.textContent = on ? '✅ 이 화면으로 확정' : '🔓 지도 영역 조정';
+      btn.className = on ? 'btn go' : 'btn';
+      document.getElementById('mp-adjust-ctl').style.display = on ? '' : 'none';
+      setText('hint', on
+        ? '지도를 끌고 줌해서 맞춘 뒤 오른쪽 "확정"을 누르세요'
+        : '시점은 실물 지도 영역에 고정 — 영역은 오른쪽 "실물 지도" 카드에서 바꿉니다');
+      updateViewLabel();
+      requestRender();
+    }
+
+    async function toggleMapAdjust() {
+      if (!mapAdjusting) { setMapAdjust(true); return; }
+      // 확정: 지금 화면을 실물 지도 영역으로 굳히고 다시 잠근다
+      await grabViewAsMap();
+      setMapAdjust(false);
+      fitToMap();
+    }
+
+    function mapZoom(d) {
+      if (!naverMap) return;
+      naverMap.setZoom(naverMap.getZoom() + d, true);
+    }
+
+    // 조정 중에 "지금 화면이 몇 km 인지" 를 보여준다. 눈대중을 없앤다.
+    function updateViewLabel() {
+      const el = document.getElementById('mp-view');
+      if (!el) return;
+      if (!naverMap || !state || !state.map) { el.textContent = '화면 범위 -'; return; }
+      const b = naverMap.getBounds(), sw = b.getSW(), ne = b.getNE();
+      const vw = (ne.lng() - sw.lng()) * M_LON, vh = (ne.lat() - sw.lat()) * M_LAT;
+      const pw = numVal('mp-w', state.map.width_m), ph = numVal('mp-h', state.map.height_m);
+      const sc = Math.ceil(Math.max(vw / pw, vh / ph));
+      el.textContent = `화면 ${(vw / 1000).toFixed(2)}km → 1:${sc}`;
+    }
+
+    // 지도 영역을 동서/남북으로 민다. dx=+1 동쪽, dy=+1 북쪽. 한 번에 10%.
+    //
+    // 지도 사각형은 입수 지점 기준 east_m / south_m 로 정의된다.
+    //   east_m 를 줄이면 동쪽 끝이 당겨져 사각형이 서쪽으로 간다.
+    //   south_m 를 줄이면 남쪽 끝이 올라가 사각형이 북쪽으로 간다.
+    async function nudgeMap(dx, dy) {
+      const m = state && state.map;
+      if (!m) return;
+      const stepE = m.real_w_m * 0.10, stepN = m.real_h_m * 0.10;
+      const east  = m.east_m  + dx * stepE;
+      const south = m.south_m - dy * stepN;
+      if (east < 0 || east > m.real_w_m || south < 0 || south > m.real_h_m) {
+        setText('mp-why', '더 밀면 입수 지점이 지도 밖으로 나갑니다');
+        return;
+      }
+      try {
+        await postJSON('/map', {
+          width_m: m.width_m, height_m: m.height_m, scale: m.scale,
+          east_m: Math.round(east * 10) / 10, south_m: Math.round(south * 10) / 10,
+        });
+        setText('mp-why', `영역 밀기 — 동 ${Math.round(east)}m / 남 ${Math.round(south)}m`);
+      } catch (e) { setText('mp-why', e.message); }
+    }
+
+    async function grabViewAsMap() {
+      if (!naverMap) { showError('네이버 지도가 켜져 있을 때만 쓸 수 있습니다'); return; }
+      const st = state, m = st && st.map;
+      if (!m) { showError('시뮬레이션 상태를 기다리는 중입니다'); return; }
+
+      const b = naverMap.getBounds(), sw = b.getSW(), ne = b.getNE();
+      const viewW = (ne.lng() - sw.lng()) * M_LON;      // 실제 m
+      const viewH = (ne.lat() - sw.lat()) * M_LAT;
+      const printW = numVal('mp-w', m.width_m), printH = numVal('mp-h', m.height_m);
+
+      // 인쇄물 비율에 맞추되 보이는 범위를 다 담는 축척
+      let scale = Math.ceil(Math.max(viewW / printW, viewH / printH));
+      // 잡기 -> 꽉 채우기 -> 다시 잡기 가 반복되면 올림 때문에 축척이 계속
+      // 커진다. 이미 5% 안쪽이면 지금 축척을 유지하고 위치만 다시 잡는다.
+      if (Math.abs(scale - m.scale) / m.scale < 0.05) scale = m.scale;
+      if (scale < 10 || scale > 2000) {
+        showError(`이 범위는 축척 1:${scale} 이 필요해서 잡을 수 없습니다 `
+          + `(허용 1:10~1:2000). ${scale > 2000 ? '더 확대' : '더 축소'}해서 다시 눌러주세요`);
+        return;
+      }
+      const realW = printW * scale, realH = printH * scale;
+
+      // 지도 사각형을 화면 중심에 놓고, 입수 지점이 그 안 어디인지로
+      // east_m / south_m 을 역산한다. (입수 지점은 탐지 좌표라 안 건드린다)
+      const cLon = (sw.lng() + ne.lng()) / 2, cLat = (sw.lat() + ne.lat()) / 2;
+      const east  = (cLon - m.origin_lon) * M_LON + realW / 2;
+      const south = (m.origin_lat - cLat) * M_LAT + realH / 2;
+
+      if (east < 0 || east > realW || south < 0 || south > realH) {
+        showError('입수 지점이 이 화면 밖입니다 — 입수 지점이 보이도록 지도를 옮겨주세요');
+        return;
+      }
+      try {
+        await postJSON('/map', {
+          width_m: printW, height_m: printH, scale,
+          east_m: Math.round(east * 10) / 10, south_m: Math.round(south * 10) / 10,
+        });
+        showError(null);
+        mapFitted = false;      // 새 영역으로 화면을 다시 맞춘다
+        setText('mp-why', `1:${scale} — 덮는 실제 ${Math.round(realW)} x ${Math.round(realH)} m`);
+      } catch (e) { showError(e.message); }
+    }
+
+    // 지도 위 한 점을 골랐을 때. 캔버스 클릭(폴백)과 네이버 지도 클릭이
+    // 같은 경로를 타야 두 모드에서 동작이 갈리지 않는다.
+    let obsPick = false;
+    function setObsPick(on) {
+      obsPick = on;
+      if (on) setTakeoffPick(false);      // 두 모드가 동시에 켜지면 안 된다
+      document.getElementById('btn-obs').classList.toggle('active', on);
+      canvas.style.cursor = on ? 'copy' : 'crosshair';
+      setText('hint', on
+        ? '관측된 지점을 클릭하세요 — 파티클이 그리로 모입니다  (Esc 취소)'
+        : '드래그: 이동  |  스크롤: 줌  |  관측값은 📍 버튼을 누른 뒤 클릭');
+      requestRender();
+    }
+    function toggleObsPick() { setObsPick(!obsPick); }
+
+    function onMapPick(lon, lat) {
       if (takeoffPick) {
         // 이륙 지점 지정 모드 — 관측값 입력이 아니다
         postJSON('/takeoff', { lon, lat })
@@ -966,11 +1275,13 @@
           .catch(err => { showError(err.message); setTakeoffPick(false); });
         return;
       }
+      if (!obsPick) return;     // 무장 안 했으면 그냥 지도 조작이다
+      setObsPick(false);        // 한 번 쓰면 풀린다 — 연속 오입력 방지
       fetch('/observation', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ lon, lat }),
       }).catch(err => console.warn('관측값 전송 실패', err));
-    });
+    }
 
     // ── 지도 설정 ──
     const numVal = (id, dflt) => {
@@ -978,7 +1289,7 @@
       return isNaN(n) ? dflt : n;
     };
 
-    async function applyMap() {
+    async function applyMap(keepCenter = true) {
       const body = {
         width_m: numVal('mp-w', 3),
         height_m: numVal('mp-h', 2),
@@ -986,11 +1297,33 @@
         east_m: numVal('mp-e', 50),
         south_m: numVal('mp-so', 150),
       };
+      // 축척만 바꿨을 때 사각형이 동/남쪽 모서리에 붙은 채 한쪽으로 줄어들면
+      // 원하는 데를 잡기가 어렵다. 지금 사각형의 중심을 유지하도록
+      // east_m / south_m 을 다시 계산한다.
+      const m = state && state.map;
+      if (keepCenter && m) {
+        const cLon = (m.lon_min + m.lon_max) / 2, cLat = (m.lat_min + m.lat_max) / 2;
+        const realW = body.width_m * body.scale, realH = body.height_m * body.scale;
+        const e = (cLon - m.origin_lon) * M_LON + realW / 2;
+        const so = (m.origin_lat - cLat) * M_LAT + realH / 2;
+        // 중심을 그대로 두면 입수 지점이 밖으로 나가는 경우가 있다.
+        // 그때는 거부하지 말고 들어오는 선까지만 민다 (조용히 안 먹는 것보다 낫다).
+        const cl = (v, hi) => Math.min(Math.max(v, 0), hi);
+        const e2 = cl(e, realW), so2 = cl(so, realH);
+        body.east_m = Math.round(e2 * 10) / 10;
+        body.south_m = Math.round(so2 * 10) / 10;
+        document.getElementById('mp-e').value = body.east_m;
+        document.getElementById('mp-so').value = body.south_m;
+        if (Math.abs(e2 - e) > 1 || Math.abs(so2 - so) > 1) {
+          setText('mp-why', '입수 지점이 들어오도록 영역을 조금 옮겼습니다');
+        }
+      }
       const btn = document.getElementById('mp-apply');
       btn.disabled = true;
       try {
         await postJSON('/map', body);
-        setText('mp-why', '');
+        setText('mp-why', `1:${body.scale} — 덮는 실제 `
+          + `${Math.round(body.width_m * body.scale)} x ${Math.round(body.height_m * body.scale)} m`);
         mapFitted = false;          // 새 영역으로 화면을 다시 맞춘다
       } catch (e) {
         setText('mp-why', e.message);
@@ -1024,16 +1357,29 @@
     }
 
     // 서버가 실제로 적용한 값을 입력칸에 반영한다 (첫 수신 시 1회)
-    let mapInputsSynced = false;
+    // 서버 값이 바뀌면 입력칸도 따라가야 한다.
+    //
+    // 예전에는 첫 수신 때 한 번만 채웠다. 그래서 지도 영역을 다른 경로로
+    // 바꾸면(밀기 버튼, 화면 잡기, 다른 창) 입력칸은 옛 값을 든 채였고,
+    // 그 상태로 '적용'을 누르면 방금 바꾼 게 통째로 되돌아갔다.
+    // 실제로 축척이 계속 원래대로 튀어 돌아가는 원인이었다.
+    // 다만 사용자가 타이핑 중인 칸은 건드리지 않는다.
+    let mapShown = '';
     function syncMapPanel(m) {
       if (!m) return;
-      if (!mapInputsSynced) {
-        mapInputsSynced = true;
-        document.getElementById('mp-w').value = m.width_m;
-        document.getElementById('mp-h').value = m.height_m;
-        document.getElementById('mp-s').value = m.scale;
-        document.getElementById('mp-e').value = m.east_m;
-        document.getElementById('mp-so').value = m.south_m;
+      const key = [m.width_m, m.height_m, m.scale, m.east_m, m.south_m].join(',');
+      if (key !== mapShown) {
+        mapShown = key;
+        const set = (id, v) => {
+          const el = document.getElementById(id);
+          if (el && document.activeElement !== el) el.value = v;
+        };
+        set('mp-w', m.width_m);
+        set('mp-h', m.height_m);
+        set('mp-s', m.scale);
+        set('mp-e', m.east_m);
+        set('mp-km', (m.real_w_m / 1000).toFixed(2));
+        set('mp-so', m.south_m);
       }
       setHTML('mp-info',
         `<span>덮는 실제 영역</span>
@@ -1048,7 +1394,7 @@
       canvas.style.cursor = on ? 'copy' : 'crosshair';
       setText('hint', on
         ? '지도에서 드론을 놓을 자리를 클릭하세요  (Esc 취소)'
-        : '드래그: 이동  |  스크롤: 줌  |  클릭: 관측값 입력');
+        : '드래그: 이동  |  스크롤: 줌  |  관측값은 📍 버튼을 누른 뒤 클릭');
       requestRender();
     }
     function toggleTakeoffPick() {
@@ -1100,7 +1446,9 @@
       else if (k === 't') toggleTheme();
       else if (e.key === 'Escape') {
         // 지정 모드 중이면 취소가 우선, 아니면 비상 착륙
-        if (takeoffPick) setTakeoffPick(false); else droneLand();
+        if (takeoffPick) setTakeoffPick(false);
+        else if (obsPick) setObsPick(false);
+        else droneLand();
       }
       else if (k === 'l') droneLand();
     });
@@ -1139,6 +1487,9 @@
     // 좌표 격자·강 폴리곤 등 예전에 배경으로 그리던 요소는 다 걷어내고, 이
     // 사진 하나만 지도 사각형의 배경이 된다(사각형 밖은 계속 스크림 처리).
     function drawMapBackground(m) {
+      // 네이버 지도가 살아 있으면 배경은 그쪽이 담당한다. 사진을 겹쳐 그리면
+      // 정합이 맞는 지도 위에 안 맞는 사진을 덮어씌우는 꼴이 된다.
+      if (naverMap) return;
       if (!m || !mapBgLoaded) return;
       const [x1, y1] = toCanvas(m.lon_min, m.lat_max);
       const [x2, y2] = toCanvas(m.lon_max, m.lat_min);
@@ -1154,7 +1505,9 @@
       ctx.beginPath();
       ctx.rect(0, 0, W, H);
       ctx.rect(x1, y1, x2 - x1, y2 - y1);
-      ctx.fillStyle = C.scrim;
+      // 지도 모드에서는 배경이 위성 사진이라 테마 스크림(밝은 테마는 흰색
+      // 68%)을 쓰면 지도가 통째로 하얗게 날아간다. 어둡고 옅게 덮는다.
+      ctx.fillStyle = naverMap ? 'rgba(8,12,18,0.42)' : C.scrim;
       ctx.fill('evenodd');
       ctx.restore();
     }
@@ -1296,6 +1649,65 @@
       });
     }
 
+    // ── 드론에 전송된 좌표 표식 ──────────────────
+    // 화면에 원래 있던 건 '지령 위치'(이동이 끝난 뒤 갱신)뿐이라, "지금 이
+    // 좌표를 드론에 넘겼다"는 순간이 보이지 않았다. 드라이버가 go 를 보내기
+    // 직전에 target_seq 를 올리므로, 그 번호가 바뀌면 새 전송으로 보고
+    // 잠깐 깜빡인 뒤 체크 표시를 남긴다.
+    const DISPATCH_FLASH_MS = 2500;
+    let dispatchMark = null;      // { lon, lat, t0, label, x_cm, y_cm }
+    let dispatchSeq  = -1;
+
+    function noteDispatch(st, m) {
+      if (!st || !m || st.target_seq == null) return;
+      if (st.target_seq === dispatchSeq) return;      // 값이 아니라 번호로 판단
+      dispatchSeq = st.target_seq;
+      if (st.target_x_cm == null) { dispatchMark = null; return; }   // 새 비행에서 리셋됨
+      const [lon, lat] = droneCmToLonLat(m, st.target_x_cm, st.target_y_cm);
+      dispatchMark = { lon, lat, t0: performance.now(), label: st.target_label || '',
+                       x_cm: st.target_x_cm, y_cm: st.target_y_cm };
+      requestRender();
+    }
+
+    function dispatchFlashing() {
+      return !!dispatchMark && (performance.now() - dispatchMark.t0) < DISPATCH_FLASH_MS;
+    }
+
+    function drawDispatchMark() {
+      if (!dispatchMark || !state || !state.map) return;
+      const [x, y] = toCanvas(dispatchMark.lon, dispatchMark.lat);
+      const age = performance.now() - dispatchMark.t0;
+
+      if (age < DISPATCH_FLASH_MS) {
+        // 링 2겹이 시차를 두고 퍼지며 사라진다. 한 겹이면 눈에 잘 안 띈다.
+        for (const off of [0, DISPATCH_FLASH_MS / 2]) {
+          const t = ((age + off) % DISPATCH_FLASH_MS) / DISPATCH_FLASH_MS;
+          ctx.beginPath();
+          ctx.arc(x, y, 10 + t * 26, 0, Math.PI * 2);
+          ctx.strokeStyle = C.drone;
+          ctx.globalAlpha = (1 - t) * 0.85;
+          ctx.lineWidth = 2.5;
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      // 마지막 전송 지점은 계속 남겨둔다 — 깜빡임이 끝나도 어디로 보냈는지
+      // 알 수 있어야 한다.
+      ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI * 2);
+      ctx.strokeStyle = C.drone; ctx.lineWidth = 2.5; ctx.stroke();
+      // 체크 획은 waypoint 방문 표시와 같은 모양을 쓴다 (같은 의미라서)
+      ctx.strokeStyle = C.pathDone; ctx.lineWidth = 2.4;
+      ctx.beginPath();
+      ctx.moveTo(x - 4, y + 1); ctx.lineTo(x - 1, y + 4); ctx.lineTo(x + 5, y - 4);
+      ctx.stroke();
+
+      const txt = '드론 전송' + (dispatchMark.label ? ` · ${dispatchMark.label}` : '');
+      ctx.fillStyle = C.drone; ctx.font = 'bold 10px sans-serif';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      ctx.fillText(txt, x + 12, y - 8);
+    }
+
     // ── 비행 경로 ────────────────────────────────
     function legEndpoints(mission, m) {
       // legs 순서대로 (이륙점 → WP… → 이륙점) 의 절대 위치를 만든다.
@@ -1430,9 +1842,8 @@
       if (!st.running && !(st.leg_done > 0)) return;
       // cur_x/cur_y 는 "이륙 지점" 기준 상대 좌표다 (Tello 기체 좌표계의 0,0).
       // 입수 지점을 기준으로 환산하면 마커가 통째로 어긋난다.
-      const [t0lon, t0lat] = takeoffPt(m);
-      const lon = t0lon + (-st.cur_y_cm / 100 * m.scale) / M_LON;
-      const lat = t0lat + (st.cur_x_cm / 100 * m.scale) / M_LAT;
+      // 수식을 복제하지 않는다. 전송 표식·자취와 같은 변환을 써야 어긋나지 않는다.
+      const [lon, lat] = droneCmToLonLat(m, st.cur_x_cm, st.cur_y_cm);
       const [x, y] = toCanvas(lon, lat);
 
       ctx.save();
@@ -1493,14 +1904,20 @@
       const s = state, m = s.map;
 
       if (autoFollow && s.best_lon != null) {
-        const lw = view.lonMax - view.lonMin, lh = view.latMax - view.latMin;
-        view.lonMin = s.best_lon - lw / 2; view.lonMax = s.best_lon + lw / 2;
-        view.latMin = s.best_lat - lh / 2; view.latMax = s.best_lat + lh / 2;
+        if (naverMap) {
+          // 지도 모드는 시점 고정이다. 따라가기가 화면을 움직이면 인쇄물과
+          // 어긋난다 — 최고 확률 지점은 지도 위 ◆ 마커로 이미 보인다.
+        } else {
+          const lw = view.lonMax - view.lonMin, lh = view.latMax - view.latMin;
+          view.lonMin = s.best_lon - lw / 2; view.lonMax = s.best_lon + lw / 2;
+          view.latMin = s.best_lat - lh / 2; view.latMax = s.best_lat + lh / 2;
+        }
       }
       updateProjection();
 
       ctx.clearRect(0, 0, W, H);
-      ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+      // 지도 모드에서는 캔버스가 투명해야 뒤에 깔린 지도가 보인다.
+      if (!naverMap) { ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H); }
 
       drawMapBackground(m);
       drawMapScrim(m);
@@ -1526,6 +1943,7 @@
       }
 
       drawWaypoints(s.waypoints || [], topN());
+      drawDispatchMark();          // 순위 마커 위에 얹는다
 
       if (m) {
         const [ex, ey] = toCanvas(m.origin_lon, m.origin_lat);
@@ -1549,7 +1967,7 @@
       updatePanel(s);
 
       // 비행 중에는 파선 애니메이션과 맥동을 위해 계속 돌린다
-      if (droneStatus && droneStatus.running) requestRender();
+      if ((droneStatus && droneStatus.running) || dispatchFlashing()) requestRender();
     }
 
     // ─────────────────────────────────────────────
@@ -1930,6 +2348,21 @@
       setText('d-leg', total ? `${done} / ${total}` : '-');
       document.getElementById('d-leg-bar').style.width = total ? (done / total * 100) + '%' : '0%';
 
+      // 전송 좌표 — 위경도와 기체 cm 를 같이 보여준다. 기체 cm 는 이벤트
+      // 로그의 go(...) 누적과 대조할 수 있는 값이라 시연 중 검증에 쓰인다.
+      const tr = document.getElementById('d-target-row');
+      if (st && st.target_x_cm != null && state && state.map) {
+        tr.style.display = '';
+        const [tlon, tlat] = droneCmToLonLat(state.map, st.target_x_cm, st.target_y_cm);
+        const age = st.target_age_sec;
+        setText('d-target',
+          `${tlat.toFixed(5)}, ${tlon.toFixed(5)}  `
+          + `(x${st.target_x_cm >= 0 ? '+' : ''}${st.target_x_cm.toFixed(0)}`
+          + ` y${st.target_y_cm >= 0 ? '+' : ''}${st.target_y_cm.toFixed(0)})`
+          + (st.target_label ? `  ${st.target_label}` : '')
+          + (age != null ? `  ${age.toFixed(0)}초 전` : ''));
+      } else tr.style.display = 'none';
+
       const rr = document.getElementById('d-result-row');
       if (st && st.result) {
         rr.style.display = '';
@@ -2072,6 +2505,7 @@
       try {
         droneStatus = await api('/drone/status');
         wait = (droneStatus.connected || droneStatus.running) ? 500 : 2000;
+        noteDispatch(droneStatus, state && state.map);
         // 인계가 끝나면 서버 쪽 mode 가 manual 로 바뀐다. 화면 세그먼트도
         // 따라가야 이동 버튼이 열린다.
         if (droneStatus.mode === 'manual' && droneKind !== 'manual'
@@ -2113,6 +2547,17 @@
       setTimeout(pollMission, 1000);
     }
 
+    // 덮는 실제 가로(km) <-> 축척은 같은 값의 다른 표현이다. 한쪽을 고치면
+    // 다른 쪽을 따라 채워서, 어느 단위로 생각하든 헷갈리지 않게 한다.
+    document.getElementById('mp-km').addEventListener('change', () => {
+      const km = numVal('mp-km', 2.7), pw = numVal('mp-w', 3);
+      document.getElementById('mp-s').value = Math.round(km * 1000 / pw);
+    });
+    document.getElementById('mp-s').addEventListener('change', () => {
+      const sc = numVal('mp-s', 900), pw = numVal('mp-w', 3);
+      document.getElementById('mp-km').value = (sc * pw / 1000).toFixed(2);
+    });
+
     ['p-top', 'p-speed', 'p-hover'].forEach(id =>
       document.getElementById(id).addEventListener('change', () => { renderDrone(); requestRender(); }));
 
@@ -2126,6 +2571,10 @@
       canvas.width = Math.round(W * dpr);
       canvas.height = Math.round(H * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (naverMap) {
+        naver.maps.Event.trigger(naverMap, 'resize');
+        if (!mapAdjusting) fitToMap();   // 조정 중엔 사용자가 맞춘 화면을 뺏지 않는다
+      }
       updateProjection();
       requestRender();
     }
@@ -2245,10 +2694,152 @@
           };
           boundsAdopted = true;
         }
-        if (!mapFitted && d.map) { mapFitted = true; fitToMap(); }
+        if (d.map) {
+          const key = [d.map.lon_min, d.map.lat_min, d.map.lon_max, d.map.lat_max].join(',');
+          if (!mapFitted || key !== lastMapKey) { mapFitted = true; lastMapKey = key; fitToMap(); }
+        }
         requestRender();
       };
     }
+
+    // ── 네이버 지도 부트스트랩 ────────────────────
+    // 키가 없거나(오프라인 시연) 스크립트 로드가 실패하면 조용히 폴백한다.
+    // 시연 중 화면이 백지가 되는 것보다 사진 배경이 낫다.
+    function setMapBadge(text, ok) {
+      const el = document.getElementById('map-mode');
+      if (!el) return;
+      el.textContent = text;
+      el.className = 'tbtn' + (ok ? ' active' : '');
+    }
+
+    function loadScript(src, timeoutMs) {
+      return new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('로드 시간 초과')), timeoutMs);
+        const el = document.createElement('script');
+        el.src = src;
+        el.onload = () => { clearTimeout(t); resolve(); };
+        el.onerror = () => { clearTimeout(t); reject(new Error('스크립트 로드 실패')); };
+        document.head.appendChild(el);
+      });
+    }
+
+    async function initNaverMap() {
+      let cid = '';
+      try {
+        const cfg = await api('/config');
+        cid = (cfg && cfg.naver_map_client_id) || '';
+      } catch (e) { /* 서버가 늦게 뜨면 폴백 */ }
+
+      if (!cid) {
+        fallbackToPhoto('키 없음 (.env 의 NAVER_MAP_CLIENT_ID)');
+        return;
+      }
+      let stage = '스크립트 로드';
+      try {
+        await loadScript(
+          'https://oapi.map.naver.com/openapi/v3/maps.js?ncpKeyId=' + encodeURIComponent(cid), 8000);
+        if (!window.naver || !naver.maps) throw new Error('naver.maps 없음 (키/도메인 확인)');
+        stage = 'Map 생성';
+
+        const c = { lat: (view.latMin + view.latMax) / 2, lng: (view.lonMin + view.lonMax) / 2 };
+        naverMap = new naver.maps.Map('navermap', {
+          center: new naver.maps.LatLng(c.lat, c.lng),
+          zoom: 15,
+          // 일반 지도가 기본이다. 강이 파랗게 칠해져 육지 경계가 또렷해서
+          // 파티클 좌초 판정과 대조하기 좋다. 위성은 배지를 눌러 전환한다.
+          mapTypeId: naver.maps.MapTypeId.NORMAL,
+          // 축척바는 우리가 캔버스에 "인쇄 0.5m = 실제 Xm" 로 그린다.
+          // 네이버 축척바(화면상 거리)와 나란히 뜨면 뜻이 달라 헷갈린다.
+          logoControl: true, mapDataControl: false, scaleControl: false,
+          // 화면은 "실물 지도 영역" 에 고정한다. 끌거나 줌해서 시점이 틀어지면
+          // 화면과 바닥의 인쇄물이 어긋난 걸 눈치채기 어렵다.
+          // 영역 자체는 '실물 지도' 카드의 km / 영역 밀기로 바꾼다.
+          draggable: false, keyboardShortcuts: false,
+          scrollWheel: false, disableDoubleClickZoom: true, disableDoubleTapZoom: true,
+          pinchZoom: false, disableKineticPan: true, zoomControl: false,
+        });
+        document.body.classList.add('navermap-on');
+        stage = '이벤트 연결';
+
+        // 지도가 움직이면 캔버스도 다시 그린다. 투영이 지도에 묶여 있으므로
+        // 이걸 빠뜨리면 파티클이 배경과 따로 논다.
+        ['idle', 'bounds_changed', 'zoom_changed', 'center_changed'].forEach(ev =>
+          naver.maps.Event.addListener(naverMap, ev, () => {
+            updateGrabLabel();
+            updateViewLabel();
+            requestRender();
+          }));
+        updateGrabLabel();
+
+        // 캔버스가 pointer-events:none 이 되므로 클릭도 지도에서 받는다.
+        // 지도가 주는 좌표를 바로 쓰니 fromCanvas 왕복이 필요 없다.
+        naver.maps.Event.addListener(naverMap, 'click', e => {
+          onMapPick(e.coord.lng(), e.coord.lat());
+        });
+
+        setMapBadge('지도: 네이버', true);
+        // 시점이 고정이라 뷰 조작 버튼은 할 일이 없다. 남겨두면 눌러보고
+        // "안 먹는다" 고 오해한다.
+        document.querySelectorAll('.view-ctl').forEach(el => { el.style.display = 'none'; });
+        setText('hint', '시점은 실물 지도 영역에 고정 — 영역은 오른쪽 "실물 지도" 카드에서 바꿉니다');
+        // 브라우저 콘솔에서 정합을 바로 확인할 수 있게 남긴다.
+        naver.maps.Event.addListener(naverMap, 'init', () => {
+          const b2 = naverMap.getBounds();
+          console.info('[지도] 네이버 준비됨 zoom=' + naverMap.getZoom()
+            + ' bounds=' + b2.getSW().lng().toFixed(5) + ',' + b2.getSW().lat().toFixed(5)
+            + ' ~ ' + b2.getNE().lng().toFixed(5) + ',' + b2.getNE().lat().toFixed(5)
+            + '  아핀정합=' + (aff.ok ? 'OK' : '실패'));
+        });
+        // 배지를 누르면 일반 <-> 위성 전환
+        document.getElementById('map-mode').onclick = () => {
+          if (!naverMap) return;
+          const cur = naverMap.getMapTypeId();
+          naverMap.setMapTypeId(cur === naver.maps.MapTypeId.NORMAL
+            ? naver.maps.MapTypeId.HYBRID : naver.maps.MapTypeId.NORMAL);
+        };
+        // 컨테이너 크기가 0 인 채로 생성되면 네이버가 그 크기를 기억한다.
+        // 크기가 잡힐 때까지 기다렸다가 resize 를 알리고 다시 맞춘다.
+        stage = '크기 확정';
+        await ensureMapSized();
+        stage = '영역 맞춤';
+        if (state && state.map) fitToMap();
+        requestRender();
+      } catch (e) {
+        fallbackToPhoto(`[${stage}] ${e.name}: ${e.message}`);
+      }
+    }
+
+    // 지도 컨테이너가 실제 크기를 가질 때까지 기다렸다가 네이버에 알린다.
+    async function ensureMapSized(tries = 20) {
+      const el = document.getElementById('navermap');
+      for (let i = 0; i < tries; i++) {
+        if (el.clientWidth > 0 && el.clientHeight > 0) break;
+        await new Promise(r => setTimeout(r, 50));
+      }
+      if (naverMap) naver.maps.Event.trigger(naverMap, 'resize');
+    }
+
+    // 배경을 오프라인 사진으로 되돌린다. 시연 중 화면이 백지가 되는 것보다 낫다.
+    function fallbackToPhoto(why) {
+      naverMap = null;
+      aff.ok = false;
+      document.body.classList.remove('navermap-on');
+      setMapBadge('지도: 오프라인 사진', false);
+      // 화면에도 남긴다. 콘솔을 안 열어도 원인을 볼 수 있어야 한다.
+      const el = document.getElementById('map-mode');
+      if (el) el.title = why;
+      setText('hint', '지도 폴백: ' + why);
+      document.querySelectorAll('.view-ctl').forEach(x => { x.style.display = ''; });
+      console.warn(why + ' — 사진 배경으로 폴백');
+      requestRender();
+    }
+
+    // 네이버는 인증 실패를 스크립트 로드 "뒤에" 비동기로 알린다. try/catch 로는
+    // 못 잡고, 안 잡으면 지도 자리가 조용히 흰 화면이 된다. 이 훅이 유일한 신호다.
+    // (키가 틀렸거나, 콘솔에 이 도메인이 등록 안 됐을 때 불린다.)
+    window.navermap_authFailure = function () {
+      fallbackToPhoto('네이버 지도 인증 실패 — 키 또는 등록 도메인(http://localhost:8000)을 확인하세요');
+    };
 
     applyTheme();
     resize();
@@ -2256,6 +2847,7 @@
     pollStatus();
     pollMission();
     initAutoTrack();      // 서버가 이미 무장돼 있으면 화면을 거기에 맞춘다
+    initNaverMap();       // 실패하면 조용히 오프라인 사진 배경으로 폴백
   </script>
 
   <!-- 열화상 확대 보기 -->

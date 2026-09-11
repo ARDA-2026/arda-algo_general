@@ -34,6 +34,12 @@ log("=== Han River Real-time Drift Simulation (FastAPI) ===")
 API_KEY  = os.getenv("API_KEY", "")
 OBS_CODE = "1018683"
 
+# 네이버 지도 Client ID. 브라우저에 노출되는 값이라 비밀은 아니지만,
+# 콘솔에 등록한 도메인 밖에서는 거부되므로 사실상 도메인 등록이 인증이다.
+# 저장소에 박지 않고 .env 로 뺀 이유는 팀원마다 다른 키를 쓸 수 있어서다.
+# 비어 있으면 프론트는 오프라인 배경(static/mapomap.jpg)으로 폴백한다.
+NAVER_MAP_CLIENT_ID = os.getenv("NAVER_MAP_CLIENT_ID", "")
+
 def get_velocity():
     url = f"https://api.hrfco.go.kr/{API_KEY}/waterlevel/list/10M/{OBS_CODE}.xml"
     try:
@@ -163,6 +169,12 @@ MAP_PRINT_H = 2.0     # 실물 지도 세로 m (남북)
 # 계산해야 한다 — 사진 속 실제 위치와 무관하게 나머지는 자동으로 안 맞음.
 MAP_EAST_M  = 151.8    # 입수 지점에서 동쪽 여유 (나머지는 서쪽 표류 구간)
 MAP_SOUTH_M = 91.4     # 입수 지점에서 남쪽 여유 (나머지는 북쪽 구간)
+
+# POST /map/reset 이 돌아갈 자리. 위 값들을 그대로 기억해둔다.
+# 예전에는 리셋이 1:150 / 50m / 150m 를 하드코딩해서, 누르면 이 프로젝트와
+# 무관한 450x300m 짜리 지도로 바뀌어버렸다.
+DEFAULT_MAP_CFG = {"print_w": MAP_PRINT_W, "print_h": MAP_PRINT_H,
+                   "scale": MAP_SCALE, "east_m": MAP_EAST_M, "south_m": MAP_SOUTH_M}
 
 GRID_CELL_M = 15.0    # 격자 한 칸이 덮을 실제 거리 (칸이 정사각형에 가깝게 유지됨)
 
@@ -691,6 +703,12 @@ async def index():
         })
 
 
+@app.get("/config")
+async def get_config():
+    """프론트가 부팅 때 필요한 설정. 지금은 네이버 지도 키뿐이다."""
+    return {"naver_map_client_id": NAVER_MAP_CLIENT_ID}
+
+
 @app.get("/river-geojson")
 async def get_river_geojson():
     return river_geojson
@@ -869,12 +887,9 @@ async def post_map_reset():
     global new_map_cfg
     if drone_api.driver.status()["running"]:
         raise HTTPException(409, "비행 중에는 지도를 바꿀 수 없습니다")
-    # south_m을 안 주면 _rebuild_map()이 지금 값(사진 보정용 91.4 등)을 그대로
-    # 들고 있어 east_m만 50으로 리셋되는 어중간한 상태가 된다 — 여기선 이
-    # 작은 데모 지도(1:150) 본연의 정중앙 배치(= height_m*scale/2)로 같이
-    # 되돌린다.
-    new_map_cfg = {"print_w": 3.0, "print_h": 2.0, "scale": 150.0,
-                   "east_m": 50.0, "south_m": 150.0}
+    # 파일 상단에서 정의한 기본값으로 되돌린다. 여기에 숫자를 또 적으면
+    # 상단 값과 어긋나서, 리셋이 "기본으로 복귀"가 아니라 "엉뚱한 값으로 변경"이 된다.
+    new_map_cfg = dict(DEFAULT_MAP_CFG)
     return {"ok": True}
 
 

@@ -87,6 +87,13 @@ class TelloDriver:
         self.spins     = 0          # 이번 비행에서 돈 바퀴 수
         self.yaw_drift = 0          # 한 바퀴마다 남는 기수 오차의 누적 (도)
         self._spin_ok  = True       # 오차가 커지면 스스로 끈다
+        # 마지막으로 기체에 "가라" 고 보낸 목적지. cur_x/cur_y 는 이동이 끝난
+        # 뒤에 갱신되므로, 화면에서 "지금 이 좌표를 보냈다" 를 보여주려면
+        # 별도로 들고 있어야 한다.
+        self.target_x = self.target_y = None    # cm, 이륙 지점 기준
+        self.target_seq   = 0       # 전송할 때마다 증가 — UI 가 새 전송을 감지하는 신호
+        self.target_ts    = 0.0
+        self.target_label = ""      # "1순위" / "WP2" / 수동 라벨
 
         self.dry_run   = True
         self.connected = False
@@ -143,6 +150,22 @@ class TelloDriver:
         """지령 위치를 자취에 남긴다. 화면에 실제 경로를 그리는 근거."""
         self.path.append((round(self.cur_x, 1), round(self.cur_y, 1)))
         del self.path[:-60]
+
+    def _mark_target(self, dx, dy, label):
+        """방금 기체에 보낸 목적지를 기록한다. go 를 내보낸 직후에 부른다.
+
+        기록값은 "가라고 명령한 지점" (cur + 이번 이동량) 이다. 추적 모드는
+        목표가 멀면 GO_MAX_CM 으로 잘라서 보내므로, 원래 목표를 남기면 화면에
+        실제로 안 간 곳이 찍힌다. 화면은 명령한 대로만 보여줘야 한다.
+
+        target_seq 는 전송마다 증가한다. UI 는 값 비교가 아니라 이 번호로
+        새 전송을 감지한다 — 같은 자리로 두 번 보내도 깜빡임이 뜨게.
+        """
+        self.target_x = round(self.cur_x + dx, 1)
+        self.target_y = round(self.cur_y + dy, 1)
+        self.target_label = label
+        self.target_ts = time.time()
+        self.target_seq += 1
 
     def clear_path(self):
         """자취만 지운다. 비행 상태나 지령 위치는 건드리지 않는다.
@@ -329,6 +352,8 @@ class TelloDriver:
         self.leg_done  = 0
         self.cur_x = self.cur_y = 0.0
         self.path   = [(0.0, 0.0)]
+        self.target_x = self.target_y = None   # 이전 비행의 전송 표식 제거
+        self.target_label = ""
         self.error  = None
         self.result = None
         self._abort.clear()
@@ -366,6 +391,7 @@ class TelloDriver:
                 dest = "원점" if leg["to_rank"] == 0 else f"WP{leg['to_rank']}"
                 self._ev(f"leg{leg['seq']} -> {dest}  go({dx}, {dy}, 0, {speed})")
 
+                self._mark_target(dx, dy, dest)   # 전송 직전에 기록
                 if not self.dry_run:
                     self._send(self._tello.go_xyz_speed, dx, dy, 0, speed)
                 else:
@@ -456,6 +482,8 @@ class TelloDriver:
         self.leg_done = self.leg_total = 0
         self.cur_x = self.cur_y = 0.0
         self.path  = [(0.0, 0.0)]
+        self.target_x = self.target_y = None   # 이전 비행의 전송 표식 제거
+        self.target_label = ""
         self._abort.clear()
         self._handover.clear()
         self._thread = threading.Thread(target=self._run_takeoff, daemon=True)
@@ -507,6 +535,7 @@ class TelloDriver:
             self.phase = "flying"
             idx, idy = int(round(dx)), int(round(dy))
             self._ev(f"[수동] {label or '이동'}  go({idx}, {idy}, 0, {speed})")
+            self._mark_target(idx, idy, label or "수동 이동")   # 전송 직전에 기록
             if not self.dry_run:
                 self._send(self._tello.go_xyz_speed, idx, idy, 0, speed)
             else:
@@ -545,6 +574,8 @@ class TelloDriver:
         self.leg_done  = self.leg_total = 0
         self.cur_x = self.cur_y = 0.0
         self.path   = [(0.0, 0.0)]
+        self.target_x = self.target_y = None   # 이전 비행의 전송 표식 제거
+        self.target_label = ""
         self.error  = None
         self.result = None
         # 회전 누적은 비행 단위다. 이전 비행의 기수 오차를 물려받으면
@@ -624,6 +655,7 @@ class TelloDriver:
                 self.leg_done += 1
                 self.leg_total = self.leg_done
                 self._ev(f"[추적] 이동 #{self.leg_done}  go({idx}, {idy}, 0, {speed})")
+                self._mark_target(idx, idy, "1순위")   # 전송 직전에 기록
                 if not self.dry_run:
                     self._send(self._tello.go_xyz_speed, idx, idy, 0, speed)
                 else:
@@ -791,6 +823,14 @@ class TelloDriver:
             "spins":       self.spins,
             "yaw_drift":   self.yaw_drift,
             "spin_ok":     self._spin_ok,
+            # 마지막으로 기체에 보낸 목적지. 화면에서 "이 좌표를 드론에 넘겼다"
+            # 를 표시하는 근거. target_seq 가 바뀌면 새 전송이다.
+            "target_x_cm":   self.target_x,
+            "target_y_cm":   self.target_y,
+            "target_seq":    self.target_seq,
+            "target_label":  self.target_label,
+            "target_age_sec": (round(time.time() - self.target_ts, 1)
+                               if self.target_ts else None),
             "idle_left":   (round(max(0.0, IDLE_LAND_SEC - (time.time() - self._last_cmd)))
                             if (self.airborne and self.phase == "hovering") else None),
             "result":      self.result,      # completed|aborted|error|incomplete
