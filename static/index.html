@@ -53,25 +53,8 @@
     #canvas-wrap {
       flex: 1;
       position: relative;
-      overflow: hidden;      /* 확대된 겹이 패널을 침범하지 않게 */
-    }
-    #map-stage {
-      position: absolute;
-      inset: 0;
-      transform-origin: 50% 50%;
     }
 
-    #zoom-slider-wrap {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      cursor: default;
-    }
-    #zoom-slider {
-      width: 90px;
-      accent-color: var(--accent);
-      cursor: pointer;
-    }
     #navermap {
       position: absolute;
       inset: 0;
@@ -570,22 +553,15 @@
     <!-- 네이버 지도. 캔버스 뒤에 깔리고, 투영의 기준이 된다.
          키가 없거나 로드에 실패하면 비어 있는 채로 남고 캔버스가 자체
          투영 + 오프라인 배경 사진으로 폴백한다. -->
-    <!-- 지도와 캔버스를 한 겹(map-stage)에 묶는다. 소수 배율은 이 겹을
-         통째로 CSS 로 확대해서 만든다 — 따로 확대하면 둘이 어긋난다. -->
-    <div id="map-stage">
-      <div id="navermap"></div>
-      <canvas id="c"></canvas>
-    </div>
+    <div id="navermap"></div>
+    <canvas id="c"></canvas>
 
     <div id="toolbar">
       <div class="tbtn view-ctl" id="btn-reset" onclick="resetView()" title="R">🏠 전체</div>
       <div class="tbtn view-ctl" id="btn-map" onclick="fitToMap()" title="M">🗺 지도 영역</div>
       <div class="tbtn view-ctl" id="btn-follow" onclick="toggleFollow()" title="F">📍 따라가기</div>
-      <div class="tbtn" id="zoom-slider-wrap" title="네이버 지도 배율 (인쇄물 설정과 무관)">
-        <span style="font-size:11px">배율</span>
-        <input type="range" id="zoom-slider" min="-2" max="3" step="0.1" value="0">
-        <span id="zoom-val" style="font-size:11px;min-width:18px;text-align:right">0</span>
-      </div>
+      <div class="tbtn" id="btn-zin" onclick="zoomAt(0.5)" title="지도 확대 (인쇄물 설정과 무관)">＋</div>
+      <div class="tbtn" id="btn-zout" onclick="zoomAt(-0.5)" title="지도 축소">－</div>
       <div class="tbtn" id="btn-theme" onclick="toggleTheme()" title="T">☾</div>
       <div class="tbtn" id="btn-obs" onclick="toggleObsPick()"
         title="누른 뒤 지도를 클릭하면 그 지점을 관측값으로 넣습니다">📍 관측값 입력</div>
@@ -1018,16 +994,9 @@
     //   0 = 영역 전체가 보임 (잘림 없음)
     //   1 = 한 단계 확대 — 사각형 가장자리가 화면 밖으로 나간다
     let viewZoom = (() => {
-      try { return Math.max(-2, Math.min(3, parseFloat(localStorage.getItem('viewZoom') || '0') || 0)); }
+      try { return Math.max(-2, Math.min(3, parseInt(localStorage.getItem('viewZoom') || '0', 10) || 0)); }
       catch (e) { return 0; }
     })();
-
-    // 겹 전체를 확대한다. 지도 타일과 캔버스가 같은 배율로 커지므로
-    // 좌표 정합은 유지된다 (투영 계산은 확대 전 좌표계에서 그대로 돈다).
-    function applyStageScale(k) {
-      const st = document.getElementById('map-stage');
-      if (st) st.style.transform = (k === 1) ? '' : `scale(${k})`;
-    }
 
     function fitToMap() {
       const m = state && state.map;
@@ -1035,14 +1004,9 @@
       const f = naverMap ? 0.01 : 0.15;
       const padL = (m.lon_max - m.lon_min) * f, padT = (m.lat_max - m.lat_min) * f;
       setView(m.lon_min - padL, m.lon_max + padL, m.lat_min - padT, m.lat_max + padT);
-      // 네이버 줌은 정수만 받는다 (실수를 주면 라이브러리가 강제로 반올림한다).
-      // 그래서 정수부만 지도에 주고, 남은 소수부는 지도+캔버스를 묶은 겹을
-      // CSS 로 확대해 만든다. 둘을 같이 확대하므로 정합은 그대로다.
-      if (naverMap) {
-        const whole = Math.floor(viewZoom);
-        if (whole) naverMap.setZoom(naverMap.getZoom() + whole, false);
-        applyStageScale(Math.pow(2, viewZoom - whole));   // 1.0 ~ 2.0
-      }
+      // fitBounds 로 맞춘 뒤 원하는 만큼 더 당긴다. 중심은 영역 중심 그대로라
+      // 사각형이 가운데를 유지한 채 커진다.
+      if (naverMap && viewZoom) naverMap.setZoom(naverMap.getZoom() + viewZoom, false);
       autoFollow = false;
       document.getElementById('btn-follow').classList.remove('active');
       requestRender();
@@ -1054,7 +1018,13 @@
     }
     function zoomAt(deltaZ, cx, cy) {
       if (naverMap) {
-        setViewZoom(viewZoom + (deltaZ > 0 ? 1 : -1));   // 키보드 +/- 도 같은 경로
+        // 지도 배율만 바꾼다. 실물 지도 영역(인쇄물)은 건드리지 않는다.
+        viewZoom = Math.min(3, Math.max(-2, viewZoom + (deltaZ > 0 ? 1 : -1)));
+        try { localStorage.setItem('viewZoom', String(viewZoom)); } catch (e) {}
+        fitToMap();
+        setText('hint', viewZoom
+          ? `지도 배율 ${viewZoom > 0 ? '+' : ''}${viewZoom} — 실물 지도 영역은 그대로입니다`
+          : '지도 배율 기본 — 실물 지도 영역 전체가 보입니다');
         return;
       }
       const factor = Math.pow(2, -deltaZ * 0.8);
@@ -1137,22 +1107,6 @@
     // 인쇄물 비율(가로:세로)은 고정이고 화면 비율은 제각각이라, 보이는 범위를
     // "전부 담는" 쪽으로 맞춘다. 화면보다 조금 넓게 잡힐 수는 있어도 보이던
     // 게 잘려 나가지는 않는다.
-    // 배율 슬라이더. 네이버 줌이 정수 단계라(내부 Math.round) 슬라이더도
-    // 정수로 둔다 — 중간값을 허용하면 끌어도 화면이 안 바뀌는 구간이 생긴다.
-    function setViewZoom(z) {
-      viewZoom = Math.min(3, Math.max(-2, Math.round(z * 10) / 10));
-      try { localStorage.setItem('viewZoom', String(viewZoom)); } catch (e) {}
-      const sl = document.getElementById('zoom-slider');
-      if (sl) sl.value = viewZoom;
-      setText('zoom-val', (viewZoom > 0 ? '+' : '') + viewZoom.toFixed(1));
-      if (naverMap) fitToMap();
-      requestRender();
-    }
-
-    document.getElementById('zoom-slider').addEventListener('input', e => {
-      setViewZoom(parseInt(e.target.value, 10));
-    });
-
     // 지도 위 한 점을 골랐을 때. 캔버스 클릭(폴백)과 네이버 지도 클릭이
     // 같은 경로를 타야 두 모드에서 동작이 갈리지 않는다.
     let obsPick = false;
@@ -1371,15 +1325,11 @@
         ctx.beginPath(); ctx.moveTo(x2, y); ctx.lineTo(x2 - 7, y); ctx.stroke();
       }
 
-      // 라벨은 화면 안으로 끌어온다. 사각형이 화면보다 크면 사각형 기준
-      // 위치가 툴바에 가리거나 화면 밖으로 나간다.
-      const lx = Math.min(Math.max(x1 + 4, 12), W - 220);
-      const ly = Math.min(Math.max(y1 + 6, 48), H - 80);   // 48 = 툴바 아래
       ctx.fillStyle = C.mapText; ctx.font = 'bold 11px sans-serif';
-      ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-      ctx.fillText(`실물 지도 ${m.width_m} × ${m.height_m} m (1:${m.scale})`, lx, ly);
-      ctx.font = '10px sans-serif';
-      ctx.fillText(`눈금 ${tick} m = 실제 ${Math.round(m.scale * tick)} m`, lx, ly + 15);
+      ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+      ctx.fillText(`실물 지도 ${m.width_m} × ${m.height_m} m (1:${m.scale})`, x1, y1 - 5);
+      ctx.font = '10px sans-serif'; ctx.textBaseline = 'top';
+      ctx.fillText(`눈금 ${tick} m = 실제 ${Math.round(m.scale * tick)} m`, x1, y2 + 5);
       ctx.restore();
     }
 
@@ -1666,11 +1616,8 @@
       ctx.moveTo(x - 4, y); ctx.lineTo(x + 4, y);
       ctx.stroke();
       ctx.fillStyle = C.takeoff; ctx.font = 'bold 10px sans-serif';
-      ctx.textBaseline = 'middle';
-      // 이륙 지점은 사각형 좌하단이라 라벨이 화면 왼쪽으로 밀려나기 쉽다.
-      // 공간이 없으면 오른쪽에 붙인다.
-      if (x < 90) { ctx.textAlign = 'left'; ctx.fillText('이륙 지점 (0,0)', x + 19, y - 18); }
-      else { ctx.textAlign = 'right'; ctx.fillText('이륙 지점 (0,0)', x - 19, y); }
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText('이륙 지점 (0,0)', x + 19, y);
       ctx.restore();
     }
 
@@ -1706,8 +1653,7 @@
 
     function drawColorbar(vmax) {
       if (!(vmax > 0)) return;
-      // 네이버 로고·저작권 표시가 화면 우하단을 쓰므로 그 위로 올린다.
-      const w = 140, h = 10, x = W - w - 16, y = H - 72;
+      const w = 140, h = 10, x = W - w - 16, y = H - 34;
       const g = ctx.createLinearGradient(x, 0, x + w, 0);
       for (let i = 0; i <= 16; i++) {
         const c = heatColor((i / 16) * vmax * 0.999 + 0.02 * vmax, vmax);
@@ -2672,7 +2618,6 @@
     pollStatus();
     pollMission();
     initAutoTrack();      // 서버가 이미 무장돼 있으면 화면을 거기에 맞춘다
-    setViewZoom(viewZoom);   // 저장된 배율을 슬라이더에 반영
     initNaverMap();       // 실패하면 조용히 오프라인 사진 배경으로 폴백
   </script>
 
