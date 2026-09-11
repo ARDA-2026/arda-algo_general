@@ -560,16 +560,14 @@
       <div class="tbtn view-ctl" id="btn-reset" onclick="resetView()" title="R">🏠 전체</div>
       <div class="tbtn view-ctl" id="btn-map" onclick="fitToMap()" title="M">🗺 지도 영역</div>
       <div class="tbtn view-ctl" id="btn-follow" onclick="toggleFollow()" title="F">📍 따라가기</div>
-      <div class="tbtn view-ctl" onclick="zoomAt(0.5)" title="+">＋</div>
-      <div class="tbtn view-ctl" onclick="zoomAt(-0.5)" title="-">－</div>
+      <div class="tbtn" id="btn-zin" onclick="zoomAt(0.5)" title="지도 확대 (인쇄물 설정과 무관)">＋</div>
+      <div class="tbtn" id="btn-zout" onclick="zoomAt(-0.5)" title="지도 축소">－</div>
       <div class="tbtn" id="btn-theme" onclick="toggleTheme()" title="T">☾</div>
       <div class="tbtn" id="btn-obs" onclick="toggleObsPick()"
         title="누른 뒤 지도를 클릭하면 그 지점을 관측값으로 넣습니다">📍 관측값 입력</div>
       <div class="tbtn" id="btn-takeoff" onclick="toggleTakeoffPick()" title="클릭 후 지도에서 이륙 지점 선택 (지도 좌하단 기준으로 저장)">🚁 이륙 지점</div>
       <!-- 현재 배경이 네이버인지 오프라인 사진인지. 시연 중 정합이 이상하면
            여기부터 봐야 하므로 눈에 보이는 곳에 둔다. -->
-      <div class="tbtn view-ctl" id="btn-grab" onclick="grabViewAsMap()"
-        title="지금 화면에 보이는 범위를 실물 지도 영역으로 잡습니다">⬚ 화면을 지도 영역으로</div>
       <div class="tbtn" id="map-mode" title="배경 지도 출처">지도: 확인 중</div>
     </div>
 
@@ -742,52 +740,16 @@
 
       </div>
 
-      <!-- ── 지도 설정 (드론 미션 좌표 변환의 기준이라 드론 탭에 둔다) ── -->
+      <!-- ── 실물 지도 (읽기 전용) ──
+           영역은 확정됐으므로 화면에서 바꾸지 않는다. 시연 중 실수로 건드리면
+           바닥에 깔린 인쇄물과 어긋나는데 그걸 알아채기가 매우 어렵다.
+           바꿔야 하면 POST /map 으로 한다. -->
       <div class="card">
         <h3>실물 지도</h3>
-        <div class="params">
-          <label>가로 m <input type="number" id="mp-w" value="3" min="0.3" max="20" step="0.1"></label>
-          <label>세로 m <input type="number" id="mp-h" value="2" min="0.3" max="20" step="0.1"></label>
-          <label>축척 1: <input type="number" id="mp-s" value="150" min="10" max="2000" step="10"></label>
-        </div>
-        <div class="params" style="margin-top:0">
-          <label>동쪽 여유 m (입수 지점 기준)
-            <input type="number" id="mp-e" value="151.8" min="0" max="5000" step="10"></label>
-          <label>남쪽 여유 m (입수 지점 기준)
-            <input type="number" id="mp-so" value="91.4" min="0" max="5000" step="10"></label>
-        </div>
-        <div class="params" style="margin-top:0">
-          <label>덮는 실제 가로 km
-            <input type="number" id="mp-km" value="2.7" min="0.05" max="20" step="0.1"></label>
-        </div>
-        <!-- 지도 영역 조정: 잠금을 잠깐 풀고 눈으로 맞춘 뒤 확정한다.
-             평소에는 시점이 고정이라 화면과 바닥 인쇄물이 어긋나지 않는다. -->
-        <button class="btn" id="mp-adjust" onclick="toggleMapAdjust()"
-          style="margin-top:8px">🔓 지도 영역 조정</button>
-        <div id="mp-adjust-ctl" style="display:none;margin-top:6px">
-          <div style="display:flex;gap:4px;align-items:center">
-            <span style="font-size:11px;color:var(--text-dim);flex:1" id="mp-view">화면 범위 -</span>
-            <button class="btn" style="width:auto;padding:2px 11px" onclick="mapZoom(1)">＋</button>
-            <button class="btn" style="width:auto;padding:2px 11px" onclick="mapZoom(-1)">－</button>
-          </div>
-          <div class="why" style="margin-top:4px">지도를 끌고 줌해서 맞춘 뒤 <b>확정</b>을 누르세요</div>
-        </div>
-
-        <!-- 지도 영역 밀기. 한 번에 가로/세로의 10%씩 움직인다.
-             east_m/south_m 을 직접 계산하지 않고도 자리를 맞출 수 있다. -->
-        <div style="display:flex;gap:4px;margin-top:6px;align-items:center">
-          <span style="font-size:11px;color:var(--text-dim);flex:1">영역 밀기</span>
-          <button class="btn" style="width:auto;padding:2px 9px" onclick="nudgeMap(-1,0)" title="서쪽으로">←</button>
-          <button class="btn" style="width:auto;padding:2px 9px" onclick="nudgeMap(0,1)" title="북쪽으로">↑</button>
-          <button class="btn" style="width:auto;padding:2px 9px" onclick="nudgeMap(0,-1)" title="남쪽으로">↓</button>
-          <button class="btn" style="width:auto;padding:2px 9px" onclick="nudgeMap(1,0)" title="동쪽으로">→</button>
-        </div>
         <div class="stat" id="mp-info"></div>
-        <div style="display:flex;gap:6px;margin-top:6px">
-          <button class="btn" id="mp-apply" onclick="applyMap()">적용</button>
-          <button class="btn" style="flex:0 0 34%" onclick="resetMap()">기본</button>
-        </div>
-        <div class="why" id="mp-why"></div>
+        <div class="stat"><span>축척</span><span class="val" id="mp-scale">-</span></div>
+        <div class="stat"><span>인쇄물</span><span class="val" id="mp-print">-</span></div>
+        <div class="why">영역은 고정입니다. 바꾸려면 서버 설정(POST /map)이 필요합니다.</div>
       </div>
     </div>
   </div>
@@ -1024,14 +986,27 @@
       document.getElementById('btn-follow').classList.remove('active');
       requestRender();
     }
+    // 네이버 지도 배율을 실물 지도 영역 기준에서 몇 단계 당길지.
+    //
+    // 인쇄물 설정(축척·크기)과는 무관하다. 화면에서 지도를 더 크게 보는 것뿐이고
+    // 실물 지도 사각형은 그 위에 그대로 얹힌다. 툴바 +/- 로 조절한다.
+    // 네이버 줌은 정수 단계라(내부 Math.round) 한 칸이 곧 2배다.
+    //   0 = 영역 전체가 보임 (잘림 없음)
+    //   1 = 한 단계 확대 — 사각형 가장자리가 화면 밖으로 나간다
+    let viewZoom = (() => {
+      try { return Math.max(-2, Math.min(3, parseInt(localStorage.getItem('viewZoom') || '0', 10) || 0)); }
+      catch (e) { return 0; }
+    })();
+
     function fitToMap() {
       const m = state && state.map;
       if (!m) return;
-      // 지도 모드에서는 실물 지도 영역이 화면을 꽉 채워야 한다. 파선 테두리가
-      // 잘리지 않을 만큼만 남긴다. 폴백 모드는 예전처럼 여유를 둔다.
       const f = naverMap ? 0.01 : 0.15;
       const padL = (m.lon_max - m.lon_min) * f, padT = (m.lat_max - m.lat_min) * f;
       setView(m.lon_min - padL, m.lon_max + padL, m.lat_min - padT, m.lat_max + padT);
+      // fitBounds 로 맞춘 뒤 원하는 만큼 더 당긴다. 중심은 영역 중심 그대로라
+      // 사각형이 가운데를 유지한 채 커진다.
+      if (naverMap && viewZoom) naverMap.setZoom(naverMap.getZoom() + viewZoom, false);
       autoFollow = false;
       document.getElementById('btn-follow').classList.remove('active');
       requestRender();
@@ -1042,7 +1017,16 @@
       requestRender();
     }
     function zoomAt(deltaZ, cx, cy) {
-      if (naverMap) return;   // 시점 고정 — 영역은 '실물 지도' 카드에서 바꾼다
+      if (naverMap) {
+        // 지도 배율만 바꾼다. 실물 지도 영역(인쇄물)은 건드리지 않는다.
+        viewZoom = Math.min(3, Math.max(-2, viewZoom + (deltaZ > 0 ? 1 : -1)));
+        try { localStorage.setItem('viewZoom', String(viewZoom)); } catch (e) {}
+        fitToMap();
+        setText('hint', viewZoom
+          ? `지도 배율 ${viewZoom > 0 ? '+' : ''}${viewZoom} — 실물 지도 영역은 그대로입니다`
+          : '지도 배율 기본 — 실물 지도 영역 전체가 보입니다');
+        return;
+      }
       const factor = Math.pow(2, -deltaZ * 0.8);
       const p = (cx !== undefined) ? fromCanvas(cx, cy)
         : { lon: (view.lonMin + view.lonMax) / 2, lat: (view.latMin + view.latMax) / 2 };
@@ -1123,135 +1107,6 @@
     // 인쇄물 비율(가로:세로)은 고정이고 화면 비율은 제각각이라, 보이는 범위를
     // "전부 담는" 쪽으로 맞춘다. 화면보다 조금 넓게 잡힐 수는 있어도 보이던
     // 게 잘려 나가지는 않는다.
-    // 지금 화면을 잡으면 어떤 축척이 되는지 버튼에 미리 보여준다.
-    function updateGrabLabel() {
-      const el = document.getElementById('btn-grab');
-      if (!el) return;
-      if (!naverMap || !state || !state.map) { el.textContent = '⬚ 화면을 지도 영역으로'; return; }
-      const b = naverMap.getBounds(), sw = b.getSW(), ne = b.getNE();
-      const vw = (ne.lng() - sw.lng()) * M_LON, vh = (ne.lat() - sw.lat()) * M_LAT;
-      const pw = numVal('mp-w', state.map.width_m), ph = numVal('mp-h', state.map.height_m);
-      const sc = Math.ceil(Math.max(vw / pw, vh / ph));
-      el.textContent = `⬚ 화면을 지도 영역으로  (지금: 1:${sc}, ${(pw * sc / 1000).toFixed(2)}km)`;
-    }
-
-    // 지도 영역 조정 모드.
-    //
-    // 평소에는 시점을 실물 지도 영역에 고정해 둔다 (화면과 바닥 인쇄물이
-    // 어긋나면 알아채기 어렵기 때문). 영역을 다시 잡을 때만 잠깐 풀고,
-    // 눈으로 맞춘 뒤 '확정' 에서 그 화면을 그대로 영역으로 굳힌다.
-    let mapAdjusting = false;
-
-    function setMapAdjust(on) {
-      if (!naverMap) { showError('네이버 지도가 켜져 있을 때만 조정할 수 있습니다'); return; }
-      mapAdjusting = on;
-      naverMap.setOptions({
-        draggable: on, scrollWheel: on, pinchZoom: on, keyboardShortcuts: on,
-        disableDoubleClickZoom: !on, disableDoubleTapZoom: !on, disableKineticPan: !on,
-      });
-      const btn = document.getElementById('mp-adjust');
-      btn.textContent = on ? '✅ 이 화면으로 확정' : '🔓 지도 영역 조정';
-      btn.className = on ? 'btn go' : 'btn';
-      document.getElementById('mp-adjust-ctl').style.display = on ? '' : 'none';
-      setText('hint', on
-        ? '지도를 끌고 줌해서 맞춘 뒤 오른쪽 "확정"을 누르세요'
-        : '시점은 실물 지도 영역에 고정 — 영역은 오른쪽 "실물 지도" 카드에서 바꿉니다');
-      updateViewLabel();
-      requestRender();
-    }
-
-    async function toggleMapAdjust() {
-      if (!mapAdjusting) { setMapAdjust(true); return; }
-      // 확정: 지금 화면을 실물 지도 영역으로 굳히고 다시 잠근다
-      await grabViewAsMap();
-      setMapAdjust(false);
-      fitToMap();
-    }
-
-    function mapZoom(d) {
-      if (!naverMap) return;
-      naverMap.setZoom(naverMap.getZoom() + d, true);
-    }
-
-    // 조정 중에 "지금 화면이 몇 km 인지" 를 보여준다. 눈대중을 없앤다.
-    function updateViewLabel() {
-      const el = document.getElementById('mp-view');
-      if (!el) return;
-      if (!naverMap || !state || !state.map) { el.textContent = '화면 범위 -'; return; }
-      const b = naverMap.getBounds(), sw = b.getSW(), ne = b.getNE();
-      const vw = (ne.lng() - sw.lng()) * M_LON, vh = (ne.lat() - sw.lat()) * M_LAT;
-      const pw = numVal('mp-w', state.map.width_m), ph = numVal('mp-h', state.map.height_m);
-      const sc = Math.ceil(Math.max(vw / pw, vh / ph));
-      el.textContent = `화면 ${(vw / 1000).toFixed(2)}km → 1:${sc}`;
-    }
-
-    // 지도 영역을 동서/남북으로 민다. dx=+1 동쪽, dy=+1 북쪽. 한 번에 10%.
-    //
-    // 지도 사각형은 입수 지점 기준 east_m / south_m 로 정의된다.
-    //   east_m 를 줄이면 동쪽 끝이 당겨져 사각형이 서쪽으로 간다.
-    //   south_m 를 줄이면 남쪽 끝이 올라가 사각형이 북쪽으로 간다.
-    async function nudgeMap(dx, dy) {
-      const m = state && state.map;
-      if (!m) return;
-      const stepE = m.real_w_m * 0.10, stepN = m.real_h_m * 0.10;
-      const east  = m.east_m  + dx * stepE;
-      const south = m.south_m - dy * stepN;
-      if (east < 0 || east > m.real_w_m || south < 0 || south > m.real_h_m) {
-        setText('mp-why', '더 밀면 입수 지점이 지도 밖으로 나갑니다');
-        return;
-      }
-      try {
-        await postJSON('/map', {
-          width_m: m.width_m, height_m: m.height_m, scale: m.scale,
-          east_m: Math.round(east * 10) / 10, south_m: Math.round(south * 10) / 10,
-        });
-        setText('mp-why', `영역 밀기 — 동 ${Math.round(east)}m / 남 ${Math.round(south)}m`);
-      } catch (e) { setText('mp-why', e.message); }
-    }
-
-    async function grabViewAsMap() {
-      if (!naverMap) { showError('네이버 지도가 켜져 있을 때만 쓸 수 있습니다'); return; }
-      const st = state, m = st && st.map;
-      if (!m) { showError('시뮬레이션 상태를 기다리는 중입니다'); return; }
-
-      const b = naverMap.getBounds(), sw = b.getSW(), ne = b.getNE();
-      const viewW = (ne.lng() - sw.lng()) * M_LON;      // 실제 m
-      const viewH = (ne.lat() - sw.lat()) * M_LAT;
-      const printW = numVal('mp-w', m.width_m), printH = numVal('mp-h', m.height_m);
-
-      // 인쇄물 비율에 맞추되 보이는 범위를 다 담는 축척
-      let scale = Math.ceil(Math.max(viewW / printW, viewH / printH));
-      // 잡기 -> 꽉 채우기 -> 다시 잡기 가 반복되면 올림 때문에 축척이 계속
-      // 커진다. 이미 5% 안쪽이면 지금 축척을 유지하고 위치만 다시 잡는다.
-      if (Math.abs(scale - m.scale) / m.scale < 0.05) scale = m.scale;
-      if (scale < 10 || scale > 2000) {
-        showError(`이 범위는 축척 1:${scale} 이 필요해서 잡을 수 없습니다 `
-          + `(허용 1:10~1:2000). ${scale > 2000 ? '더 확대' : '더 축소'}해서 다시 눌러주세요`);
-        return;
-      }
-      const realW = printW * scale, realH = printH * scale;
-
-      // 지도 사각형을 화면 중심에 놓고, 입수 지점이 그 안 어디인지로
-      // east_m / south_m 을 역산한다. (입수 지점은 탐지 좌표라 안 건드린다)
-      const cLon = (sw.lng() + ne.lng()) / 2, cLat = (sw.lat() + ne.lat()) / 2;
-      const east  = (cLon - m.origin_lon) * M_LON + realW / 2;
-      const south = (m.origin_lat - cLat) * M_LAT + realH / 2;
-
-      if (east < 0 || east > realW || south < 0 || south > realH) {
-        showError('입수 지점이 이 화면 밖입니다 — 입수 지점이 보이도록 지도를 옮겨주세요');
-        return;
-      }
-      try {
-        await postJSON('/map', {
-          width_m: printW, height_m: printH, scale,
-          east_m: Math.round(east * 10) / 10, south_m: Math.round(south * 10) / 10,
-        });
-        showError(null);
-        mapFitted = false;      // 새 영역으로 화면을 다시 맞춘다
-        setText('mp-why', `1:${scale} — 덮는 실제 ${Math.round(realW)} x ${Math.round(realH)} m`);
-      } catch (e) { showError(e.message); }
-    }
-
     // 지도 위 한 점을 골랐을 때. 캔버스 클릭(폴백)과 네이버 지도 클릭이
     // 같은 경로를 타야 두 모드에서 동작이 갈리지 않는다.
     let obsPick = false;
@@ -1289,57 +1144,6 @@
       return isNaN(n) ? dflt : n;
     };
 
-    async function applyMap(keepCenter = true) {
-      const body = {
-        width_m: numVal('mp-w', 3),
-        height_m: numVal('mp-h', 2),
-        scale: numVal('mp-s', 150),
-        east_m: numVal('mp-e', 50),
-        south_m: numVal('mp-so', 150),
-      };
-      // 축척만 바꿨을 때 사각형이 동/남쪽 모서리에 붙은 채 한쪽으로 줄어들면
-      // 원하는 데를 잡기가 어렵다. 지금 사각형의 중심을 유지하도록
-      // east_m / south_m 을 다시 계산한다.
-      const m = state && state.map;
-      if (keepCenter && m) {
-        const cLon = (m.lon_min + m.lon_max) / 2, cLat = (m.lat_min + m.lat_max) / 2;
-        const realW = body.width_m * body.scale, realH = body.height_m * body.scale;
-        const e = (cLon - m.origin_lon) * M_LON + realW / 2;
-        const so = (m.origin_lat - cLat) * M_LAT + realH / 2;
-        // 중심을 그대로 두면 입수 지점이 밖으로 나가는 경우가 있다.
-        // 그때는 거부하지 말고 들어오는 선까지만 민다 (조용히 안 먹는 것보다 낫다).
-        const cl = (v, hi) => Math.min(Math.max(v, 0), hi);
-        const e2 = cl(e, realW), so2 = cl(so, realH);
-        body.east_m = Math.round(e2 * 10) / 10;
-        body.south_m = Math.round(so2 * 10) / 10;
-        document.getElementById('mp-e').value = body.east_m;
-        document.getElementById('mp-so').value = body.south_m;
-        if (Math.abs(e2 - e) > 1 || Math.abs(so2 - so) > 1) {
-          setText('mp-why', '입수 지점이 들어오도록 영역을 조금 옮겼습니다');
-        }
-      }
-      const btn = document.getElementById('mp-apply');
-      btn.disabled = true;
-      try {
-        await postJSON('/map', body);
-        setText('mp-why', `1:${body.scale} — 덮는 실제 `
-          + `${Math.round(body.width_m * body.scale)} x ${Math.round(body.height_m * body.scale)} m`);
-        mapFitted = false;          // 새 영역으로 화면을 다시 맞춘다
-      } catch (e) {
-        setText('mp-why', e.message);
-      } finally {
-        btn.disabled = false;
-      }
-    }
-
-    async function resetMap() {
-      try {
-        await postJSON('/map/reset');
-        setText('mp-why', '');
-        mapFitted = false;
-      } catch (e) { setText('mp-why', e.message); }
-    }
-
     // 서버가 적용한 이륙 지점을 화면에 반영한다. 지도 클릭(🚁)이나 /takeoff/reset
     // 으로도 바뀌므로 첫 수신 1회가 아니라 값이 바뀔 때마다 따라가야 한다.
     // 다만 사용자가 타이핑 중인 칸은 건드리지 않는다.
@@ -1357,33 +1161,14 @@
     }
 
     // 서버가 실제로 적용한 값을 입력칸에 반영한다 (첫 수신 시 1회)
-    // 서버 값이 바뀌면 입력칸도 따라가야 한다.
-    //
-    // 예전에는 첫 수신 때 한 번만 채웠다. 그래서 지도 영역을 다른 경로로
-    // 바꾸면(밀기 버튼, 화면 잡기, 다른 창) 입력칸은 옛 값을 든 채였고,
-    // 그 상태로 '적용'을 누르면 방금 바꾼 게 통째로 되돌아갔다.
-    // 실제로 축척이 계속 원래대로 튀어 돌아가는 원인이었다.
-    // 다만 사용자가 타이핑 중인 칸은 건드리지 않는다.
-    let mapShown = '';
+    // 실물 지도 정보 표시 (읽기 전용)
     function syncMapPanel(m) {
       if (!m) return;
-      const key = [m.width_m, m.height_m, m.scale, m.east_m, m.south_m].join(',');
-      if (key !== mapShown) {
-        mapShown = key;
-        const set = (id, v) => {
-          const el = document.getElementById(id);
-          if (el && document.activeElement !== el) el.value = v;
-        };
-        set('mp-w', m.width_m);
-        set('mp-h', m.height_m);
-        set('mp-s', m.scale);
-        set('mp-e', m.east_m);
-        set('mp-km', (m.real_w_m / 1000).toFixed(2));
-        set('mp-so', m.south_m);
-      }
       setHTML('mp-info',
         `<span>덮는 실제 영역</span>
      <span class="val">${Math.round(m.real_w_m)} × ${Math.round(m.real_h_m)} m</span>`);
+      setText('mp-scale', `1:${Math.round(m.scale)}`);
+      setText('mp-print', `${m.width_m} × ${m.height_m} m`);
     }
 
     // ── 이륙 지점 지정 ──
@@ -2547,17 +2332,6 @@
       setTimeout(pollMission, 1000);
     }
 
-    // 덮는 실제 가로(km) <-> 축척은 같은 값의 다른 표현이다. 한쪽을 고치면
-    // 다른 쪽을 따라 채워서, 어느 단위로 생각하든 헷갈리지 않게 한다.
-    document.getElementById('mp-km').addEventListener('change', () => {
-      const km = numVal('mp-km', 2.7), pw = numVal('mp-w', 3);
-      document.getElementById('mp-s').value = Math.round(km * 1000 / pw);
-    });
-    document.getElementById('mp-s').addEventListener('change', () => {
-      const sc = numVal('mp-s', 900), pw = numVal('mp-w', 3);
-      document.getElementById('mp-km').value = (sc * pw / 1000).toFixed(2);
-    });
-
     ['p-top', 'p-speed', 'p-hover'].forEach(id =>
       document.getElementById(id).addEventListener('change', () => { renderDrone(); requestRender(); }));
 
@@ -2573,7 +2347,7 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       if (naverMap) {
         naver.maps.Event.trigger(naverMap, 'resize');
-        if (!mapAdjusting) fitToMap();   // 조정 중엔 사용자가 맞춘 화면을 뺏지 않는다
+        fitToMap();      // 시점 고정 — 창이 바뀌어도 실물 지도 영역을 유지한다
       }
       updateProjection();
       requestRender();
@@ -2765,11 +2539,8 @@
         // 이걸 빠뜨리면 파티클이 배경과 따로 논다.
         ['idle', 'bounds_changed', 'zoom_changed', 'center_changed'].forEach(ev =>
           naver.maps.Event.addListener(naverMap, ev, () => {
-            updateGrabLabel();
-            updateViewLabel();
             requestRender();
           }));
-        updateGrabLabel();
 
         // 캔버스가 pointer-events:none 이 되므로 클릭도 지도에서 받는다.
         // 지도가 주는 좌표를 바로 쓰니 fromCanvas 왕복이 필요 없다.
