@@ -113,13 +113,14 @@ py -3.10 -m venv .venv
 python -m pip install --upgrade pip
 
 # 4. 패키지 설치
-pip install numpy matplotlib "shapely>=2.0" osmnx geopandas fiona pyproj requests networkx pyqt5 fastapi "uvicorn[standard]"
+python -m pip install -r requirements.txt
 ```
 
-또는 requirements.txt로 한 번에 설치:
+위 명령은 FastAPI, Uvicorn, python-dotenv를 포함한 필요한 패키지를 한 번에 설치합니다.
+가상환경을 이미 생성하고 활성화했다면 아래 명령만 실행하세요:
 
 ```powershell
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 ---
