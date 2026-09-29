@@ -44,6 +44,9 @@ TRACK_MAX_SEC      = 180.0  # 추적 최대 시간
 TRACK_MAX_HOPS     = 60     # 폭주 방지 상한
 
 # Tello 는 15초 동안 아무 명령도 못 받으면 스스로 착륙한다 (SDK 2.0 사양).
+# 통신 두절을 확인했을 때는 이 기체 내장 fail-safe 를 방해하지 않는 것이
+# 지상 프로그램이 할 수 있는 가장 안전한 동작이다.
+TELLO_AUTO_LAND_SEC = 15.0
 # 추적 모드는 목표가 20cm 이상 움직여야 go 를 보내므로 표류가 느리면
 # 30초 넘게 아무것도 안 보내는 구간이 생긴다. 그러면 기체가 착륙해버리고
 # 다음 go 는 "error Motor stop" 으로 실패한다 — 실제로 겪은 증상이다.
@@ -51,6 +54,17 @@ TRACK_MAX_HOPS     = 60     # 폭주 방지 상한
 # djitellopy 의 get_battery()/get_height() 는 상태 스트림(UDP 8890)을 읽을
 # 뿐 패킷을 보내지 않는다. 즉 배터리를 계속 조회해도 타이머는 안 풀린다.
 KEEPALIVE_SEC = 5.0
+
+# ── 네트워크 fail-safe ──
+# keepalive는 "보냈다"만으로 링크가 살아 있다고 판단하면 안 된다. UDP sendto는
+# Wi-Fi가 끊겨도 로컬 소켓 단계에서는 성공할 수 있기 때문이다. 따라서 짧은
+# timeout으로 Tello의 `ok` 응답까지 확인하고, 연속 실패 시 더 이상 이동 명령이나
+# keepalive를 보내지 않는다. 그 뒤에는 Tello 자체의 명령 미수신 자동착륙에 맡긴다.
+LINK_PROBE_TIMEOUT_SEC = 1.5
+LINK_FAILURE_LIMIT     = 2
+# 두 번째 probe 가 실제로 기체에 도달했을 가능성까지 고려해, 두절 직후
+# 재연결 패킷이 자동착륙 타이머를 다시 깨우지 않도록 여유를 둔다.
+LINK_RECONNECT_GUARD_SEC = TELLO_AUTO_LAND_SEC + 3.0
 
 # ── 대기 중 제자리 회전 ──
 # 목표가 아직 없거나 임계값만큼 안 벌어져서 이동할 게 없을 때, 가만히 떠
@@ -68,9 +82,13 @@ SPIN_TURN_DEG   = 360
 YAW_DRIFT_LIMIT = 25    # 누적 기수 오차가 이만큼 넘으면 회전을 그만둔다
 
 
+class NetworkLinkUnavailableError(RuntimeError):
+    """Tello 명령 링크가 불안정하거나 끊겨 새 비행 명령을 거부할 때 사용."""
+
+
 
 class TelloDriver:
-    def __init__(self):
+    def __init__(self, start_watchdog=True):
         self._lock    = threading.Lock()
         self._tello   = None
         self._thread  = None
@@ -83,6 +101,14 @@ class TelloDriver:
         # 큐에서 두 명령의 응답이 뒤섞인다.
         self._tx      = threading.Lock()
         self._last_tx = 0.0         # 마지막으로 기체에 뭔가 보낸 시각
+        # 응답 확인 기반 네트워크 상태. raw UDP 전송 성공은 링크 정상의 근거가
+        # 아니므로 `_last_link_ok`는 반드시 Tello 응답을 받은 경우에만 갱신한다.
+        self._link_state = "disconnected"  # disconnected|healthy|degraded|lost|dry_run
+        self._link_failures = 0
+        self._last_link_ok = 0.0
+        self._last_link_error = None
+        self._link_lost_at = 0.0
+        self._network_failsafe = threading.Event()
         # 대기 중 제자리 회전
         self.spins     = 0          # 이번 비행에서 돈 바퀴 수
         self.yaw_drift = 0          # 한 바퀴마다 남는 기수 오차의 누적 (도)
@@ -97,7 +123,7 @@ class TelloDriver:
 
         self.dry_run   = True
         self.connected = False
-        self.phase     = "idle"     # idle|connecting|ready|takeoff|flying|landing|error
+        self.phase     = "idle"     # idle|connecting|ready|takeoff|flying|landing|link_lost|error
         self.battery   = None
         self.cur_x     = 0.0        # 지령 위치 (cm, 원점 기준)
         self.cur_y     = 0.0
@@ -117,7 +143,8 @@ class TelloDriver:
         self.path      = [(0.0, 0.0)]
 
         # 수동 모드에서 떠 있는 채로 방치되는 걸 막는 감시 스레드
-        threading.Thread(target=self._idle_watch, daemon=True).start()
+        if start_watchdog:
+            threading.Thread(target=self._idle_watch, daemon=True).start()
 
     # ── 내부 유틸 ───────────────────────────────────────────
     def _ev(self, msg):
@@ -144,7 +171,107 @@ class TelloDriver:
 
     def _stop_requested(self):
         """실행 루프를 빠져나가야 하는가. 착륙 여부는 finally 가 정한다."""
-        return self._abort.is_set() or self._handover.is_set()
+        return (self._abort.is_set() or self._handover.is_set()
+                or self._network_failsafe.is_set())
+
+    def _reset_link_state(self, state="disconnected"):
+        """새 연결 전에 이전 비행의 통신 실패 상태를 지운다."""
+        self._link_state = state
+        self._link_failures = 0
+        self._last_link_ok = 0.0
+        self._last_link_error = None
+        self._link_lost_at = 0.0
+        self._network_failsafe.clear()
+
+    @staticmethod
+    def _is_transport_failure(exc):
+        """명령 거부와 UDP/소켓 단절을 구분한다.
+
+        예를 들어 'error Motor stop' 은 기체가 정상 응답한 명령 오류이지
+        링크 단절이 아니다. 반대로 timeout/소켓 오류는 응답 경로를 신뢰할 수
+        없다는 뜻이므로 fail-safe 카운터에 넣는다.
+        """
+        if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+            return True
+        detail = str(exc).lower()
+        markers = (
+            "did not receive a response", "no response", "timed out", "timeout",
+            "network is unreachable", "no route to host", "host unreachable",
+            "connection reset", "connection refused", "socket error",
+        )
+        return any(marker in detail for marker in markers)
+
+    def _mark_link_healthy(self):
+        """Tello 응답을 실제로 받았을 때만 링크 정상으로 승격한다."""
+        if self.dry_run or self._network_failsafe.is_set():
+            return
+        self._link_state = "healthy"
+        self._link_failures = 0
+        self._last_link_ok = time.time()
+        self._last_link_error = None
+
+    def _mark_link_failure(self, exc, source, *, force_lost=False):
+        """응답 확인 실패를 누적하고, 임계치를 넘으면 송신을 완전히 멈춘다.
+
+        force_lost 는 착륙 응답이 사라진 경우에만 쓴다. 이미 land 패킷이
+        도달했는지 알 수 없으므로 keepalive 로 비행을 연장하지 않는 편이
+        안전하다.
+        """
+        if self.dry_run or self._network_failsafe.is_set():
+            return
+        self._link_failures += 1
+        self._last_link_error = f"{source}: {type(exc).__name__}: {exc}"
+
+        if not force_lost and self._link_failures < LINK_FAILURE_LIMIT:
+            self._link_state = "degraded"
+            self._ev(
+                f"[통신] {source} 응답 확인 실패 "
+                f"({self._link_failures}/{LINK_FAILURE_LIMIT}) - "
+                "새 이동 명령 보류, 다음 keepalive 로 재확인"
+            )
+            return
+
+        self._link_state = "lost"
+        self._link_lost_at = time.time()
+        self._network_failsafe.set()
+        self.connected = False
+        self._abort.set()
+        self._handover.clear()
+        reason = (
+            f"{source} 응답 확인 실패 - 착륙 명령 수신 여부를 알 수 없어"
+            if force_lost else
+            f"{source} 응답 확인 {LINK_FAILURE_LIMIT}회 연속 실패 -"
+        )
+        self._ev(
+            f"[통신] {reason} 새 이동 명령과 keepalive 를 중지합니다. "
+            f"Tello 자체의 {TELLO_AUTO_LAND_SEC:.0f}초 무명령 자동착륙을 기다립니다."
+        )
+
+    def _require_flight_link(self):
+        """새 이륙·이동은 응답 확인된 정상 링크에서만 허용한다."""
+        if self.dry_run:
+            return
+        if self._network_failsafe.is_set() or self._link_state == "lost":
+            raise NetworkLinkUnavailableError(
+                "Tello 통신이 두절되어 새 비행 명령을 보낼 수 없습니다")
+        if self._link_state != "healthy":
+            raise NetworkLinkUnavailableError(
+                "Tello 통신 응답이 불안정하여 새 이동 명령을 보류했습니다")
+
+    def _finish_network_failsafe(self, where):
+        """두절 확정 후 상태를 남기되, 도달하지 않을 착륙 패킷은 보내지 않는다."""
+        if not self._network_failsafe.is_set():
+            return
+        self._abort.set()
+        self._handover.clear()
+        self.connected = False
+        self.phase = "link_lost"
+        self.result = "link_lost"
+        self.error = self._last_link_error or "Tello 통신 두절"
+        self._ev(
+            f"[{where}] 통신 두절 fail-safe 활성화 - 추가 착륙 명령은 보내지 않고 "
+            "기체의 자동착륙을 기다립니다"
+        )
 
     def _mark_path(self):
         """지령 위치를 자취에 남긴다. 화면에 실제 경로를 그리는 근거."""
@@ -177,39 +304,78 @@ class TelloDriver:
         return self.status()
 
     # ── 기체 통신 ───────────────────────────────────────────
-    def _send(self, fn, *a, **kw):
-        """기체로 나가는 명령은 전부 이걸 거친다. 직렬화 + 송신 시각 기록.
+    def _send(self, fn, *a, _track_link=True, _force_link_loss_on_failure=False, **kw):
+        """기체로 나가는 명령은 전부 이걸 거친다.
 
         시각은 호출이 끝난 뒤에 찍는다. go 는 기체가 실제로 다 움직인 뒤에
         응답하므로, 시작 시각으로 재면 비행 시간만큼 타이머를 잘못 앞당긴다.
+        일반 비행 명령은 예외 없이 끝나야만 링크 정상으로 기록한다. 전송은
+        됐지만 응답이 없는 go 는 이미 기체가 움직였을 수도 있으므로 이
+        fail-safe 계층에서 추가 재시도하지 않고, 호출자에게 예외를 넘겨
+        안전 착륙 경로를 선택하게 한다.
         """
+        if self._network_failsafe.is_set():
+            raise NetworkLinkUnavailableError(
+                "통신 두절 fail-safe 중에는 기체에 명령을 보내지 않습니다")
+        source = getattr(fn, "__name__", "Tello command")
         with self._tx:
+            if self._network_failsafe.is_set():
+                raise NetworkLinkUnavailableError(
+                    "통신 두절 fail-safe 중에는 기체에 명령을 보내지 않습니다")
             try:
-                return fn(*a, **kw)
+                result = fn(*a, **kw)
+            except Exception as e:
+                if _track_link and self._is_transport_failure(e):
+                    self._mark_link_failure(
+                        e, source, force_lost=_force_link_loss_on_failure)
+                raise
+            else:
+                if _track_link:
+                    self._mark_link_healthy()
+                return result
             finally:
                 self._last_tx = time.time()
 
     def _keepalive(self):
-        """15초 자동 착륙을 막는다. 마지막 송신 후 KEEPALIVE_SEC 지났을 때만.
+        """짧은 응답 확인 keepalive. 마지막 송신 후 KEEPALIVE_SEC 지났을 때만.
 
-        djitellopy 의 send_keepalive() 는 쓰지 않는다. 그건 send_control_command
-        라서 'ok' 를 못 받으면 7초 타임아웃 × 3회 = 21초를 블로킹한 뒤 예외를
-        던진다 (tello.py:474, RESPONSE_TIMEOUT=7, RETRY_COUNT=3). 그동안 _tx
-        락을 쥐고 있으니 정작 필요한 go 가 21초 밀린다. 심장박동 하나가
-        비행을 멈춰 세우면 안 된다.
+        send_keepalive() 는 send_control_command 경로라 응답이 없을 때 기본
+        timeout/retry 만큼 오래 막힌다. 여기서는 send_command_with_return 을
+        한 번만 호출하고 1.5초 안에 ok 를 받아야 링크 정상으로 본다.
 
-        대신 응답을 안 기다리는 raw 전송을 쓴다. 5초마다 보내므로 두 번
-        연속 유실돼도 15초 안에 다음 게 나간다.
+        첫 실패에는 이동을 보류한 채 다음 주기에 한 번 더 확인한다. 두 번째
+        실패부터는 더 이상 패킷을 보내지 않아 Tello 자체 자동착륙에 맡긴다.
         """
-        if self.dry_run or self._tello is None or not self.airborne:
+        if (self.dry_run or self._tello is None or not self.airborne
+                or self._network_failsafe.is_set()):
             return
         if time.time() - self._last_tx < KEEPALIVE_SEC:
             return
+
+        response = None
+        failure = None
         try:
-            self._send(self._tello.send_command_without_return, "keepalive")
+            with self._tx:
+                if self._network_failsafe.is_set():
+                    return
+                try:
+                    response = self._tello.send_command_with_return(
+                        "keepalive", timeout=LINK_PROBE_TIMEOUT_SEC)
+                except Exception as e:
+                    failure = e
+                finally:
+                    self._last_tx = time.time()
         except Exception as e:
-            # 실패해도 비행은 계속돼야 한다. 다음 주기에 다시 시도한다.
-            self._ev(f"[keepalive] 실패 - {type(e).__name__}: {e}")
+            # 락/라이브러리 자체 오류도 응답 확인 실패로 취급한다.
+            failure = e
+
+        if failure is not None:
+            self._mark_link_failure(failure, "keepalive")
+        elif not isinstance(response, str) or "ok" not in response.lower():
+            self._mark_link_failure(
+                RuntimeError(f"unexpected response {response!r}"), "keepalive")
+        else:
+            self._mark_link_healthy()
 
     def _yaw(self):
         """상태 스트림의 기수각(도). 패킷을 보내지 않는다."""
@@ -225,6 +391,8 @@ class TelloDriver:
         스스로 회전을 끄고 제자리 유지로 내려온다 — 좌표계가 조용히 어긋난
         채로 계속 나는 것보다 낫다.
         """
+        if self._network_failsafe.is_set():
+            return
         if time.time() - self._last_tx < KEEPALIVE_SEC:
             return
         if self.dry_run:
@@ -233,9 +401,15 @@ class TelloDriver:
             self._ev(f"[대기] 제자리 1회전 (#{self.spins})")
             time.sleep(1.0)
             return
+        if self._link_state != "healthy":
+            # 불안정한 링크에서는 수색 회전을 새로 시작하지 않는다. probe 가
+            # 성공하면 다음 대기 주기부터 다시 회전할 수 있다.
+            self._keepalive()
+            return
 
         y0 = self._yaw()
         try:
+            self._require_flight_link()
             self._send(self._tello.rotate_clockwise, SPIN_TURN_DEG)
         except Exception as e:
             self._spin_ok = False
@@ -277,16 +451,37 @@ class TelloDriver:
         if self._busy():
             raise RuntimeError("미션 실행 중에는 연결을 바꿀 수 없습니다")
 
+        # 통신 두절 직후 connect() 가 보내는 command 패킷도 기체의 무명령
+        # 자동착륙 타이머를 다시 시작시킬 수 있다. 최소 대기 시간 전에는
+        # 재연결 자체를 거부한다.
+        if self._network_failsafe.is_set():
+            elapsed = time.time() - self._link_lost_at
+            left = LINK_RECONNECT_GUARD_SEC - elapsed
+            if left > 0:
+                raise RuntimeError(
+                    "통신 두절 fail-safe 중입니다. 기체 자동착륙을 위해 "
+                    f"{left:.0f}초 뒤에 재연결하세요")
+            if not dry_run:
+                self._ev(
+                    "[통신] 자동착륙 대기 시간이 지났습니다 - 재연결 전 기체가 "
+                    "실제로 착륙했는지 눈으로 확인하세요"
+                )
+        elif self.airborne:
+            raise RuntimeError("비행 중에는 연결 모드를 바꿀 수 없습니다")
+
         self.dry_run = dry_run
         self.error   = None
 
         if dry_run:
+            self._reset_link_state("dry_run")
             self.connected = True
+            self.airborne  = False
             self.battery   = 100
             self.phase     = "ready"
             self._ev("DRY-RUN 모드로 연결 (실제 기체 없음)")
             return self.status()
 
+        self._reset_link_state("disconnected")
         self.phase = "connecting"
         try:
             from djitellopy import Tello
@@ -308,9 +503,13 @@ class TelloDriver:
                 del old            # __del__ 을 여기서 끝내고 새 인스턴스를 만든다
 
             self._tello = Tello()
-            self._send(self._tello.connect)                    # "command" 전송 후 ok 대기
+            # 연결 실패는 아직 비행 중 링크 단절로 보지 않는다. 성공했을 때만
+            # 응답 확인 상태를 healthy 로 올린다.
+            self._send(self._tello.connect, _track_link=False) # "command" 전송 후 ok 대기
+            self._mark_link_healthy()
             self.battery   = self._tello.get_battery()
             self.connected = True
+            self.airborne  = False
             self.phase     = "ready"
             self._ev(f"기체 연결됨. 배터리 {self.battery}%")
         except Exception as e:
@@ -327,6 +526,7 @@ class TelloDriver:
             raise RuntimeError("먼저 /drone/connect 로 연결하세요")
         if self._busy():
             raise RuntimeError("이미 미션이 실행 중입니다")
+        self._require_flight_link()
 
         # 안전 검사 ①: 지도 밖 waypoint
         out = [p["rank"] for p in mission["points"] if not p["in_bounds"]]
@@ -371,6 +571,11 @@ class TelloDriver:
         try:
             self.phase = "takeoff"
             self._ev("이륙")
+            self._require_flight_link()
+            # takeoff 패킷은 기체에 도달했는데 응답만 유실될 수 있다. 그 경우
+            # finally 에서 land 를 한 번 시도할 수 있도록 먼저 비행 가능 상태로
+            # 표시한다.
+            self.airborne = True
             if not self.dry_run:
                 self._send(self._tello.takeoff)
             else:
@@ -391,6 +596,7 @@ class TelloDriver:
                 dest = "원점" if leg["to_rank"] == 0 else f"WP{leg['to_rank']}"
                 self._ev(f"leg{leg['seq']} -> {dest}  go({dx}, {dy}, 0, {speed})")
 
+                self._require_flight_link()
                 self._mark_target(dx, dy, dest)   # 전송 직전에 기록
                 if not self.dry_run:
                     self._send(self._tello.go_xyz_speed, dx, dy, 0, speed)
@@ -412,6 +618,12 @@ class TelloDriver:
             self._ev(f"오류 - {self.error}")
 
         finally:
+            # 두절이 확정됐으면 land 패킷도 도달하지 않을 가능성이 높다. 여기서
+            # 계속 재시도하면 오히려 기체의 무명령 자동착륙 타이머를 깨울 수 있다.
+            if self._network_failsafe.is_set():
+                self._finish_network_failsafe("미션")
+                return
+
             # 수동 전환 요청이면 착륙하지 않고 그 자리에 떠 있는 채로 넘긴다.
             # 이게 _abort 와 다른 점이다 - _abort 는 무조건 내린다.
             if self._handover.is_set():
@@ -424,18 +636,25 @@ class TelloDriver:
                          f"(유휴 {IDLE_LAND_SEC:.0f}초 후 자동 착륙)")
                 return
 
-            # 무슨 일이 있어도 착륙시킨다
-            self.phase = "landing"
-            self._ev("착륙")
-            try:
-                if not self.dry_run:
-                    self._send(self._tello.land)
-                else:
-                    time.sleep(1.0)
-            except Exception as e:
-                failed = True
-                self.error = f"착륙 실패: {type(e).__name__}: {e}"
-                self._ev(self.error)
+            # 이륙 명령을 시도한 경우에만 착륙시킨다.
+            if self.airborne:
+                self.phase = "landing"
+                self._ev("착륙")
+                try:
+                    if not self.dry_run:
+                        self._send(
+                            self._tello.land, _force_link_loss_on_failure=True)
+                    else:
+                        time.sleep(1.0)
+                except Exception as e:
+                    failed = True
+                    self.error = f"착륙 실패: {type(e).__name__}: {e}"
+                    self._ev(self.error)
+
+            if self._network_failsafe.is_set():
+                self._finish_network_failsafe("미션")
+                return
+            self.airborne = False
 
             # 종료 사유를 명확히 남긴다.
             # phase 만으로는 정상완료/중단/실패를 구분할 수 없다.
@@ -459,6 +678,7 @@ class TelloDriver:
             raise RuntimeError("먼저 /drone/connect 로 연결하세요")
         if self._busy():
             raise RuntimeError("이미 명령을 수행 중입니다")
+        self._require_flight_link()
 
     def _check_battery(self):
         if not self.dry_run:
@@ -494,11 +714,14 @@ class TelloDriver:
     def _run_takeoff(self):
         try:
             self.phase = "takeoff"
+            self._require_flight_link()
+            # takeoff 응답이 유실돼도 기체가 이미 떠 있을 수 있으므로, 아래
+            # 예외 경로에서 안전 착륙을 한 번 시도할 수 있게 먼저 표시한다.
+            self.airborne = True
             if not self.dry_run:
                 self._send(self._tello.takeoff)
             else:
                 time.sleep(1.0)
-            self.airborne  = True
             self._last_cmd = time.time()
             self.phase     = "hovering"
             self._ev("[수동] 이륙 완료 - 대기 중")
@@ -535,6 +758,7 @@ class TelloDriver:
             self.phase = "flying"
             idx, idy = int(round(dx)), int(round(dy))
             self._ev(f"[수동] {label or '이동'}  go({idx}, {idy}, 0, {speed})")
+            self._require_flight_link()
             self._mark_target(idx, idy, label or "수동 이동")   # 전송 직전에 기록
             if not self.dry_run:
                 self._send(self._tello.go_xyz_speed, idx, idy, 0, speed)
@@ -598,11 +822,14 @@ class TelloDriver:
         try:
             self.phase = "takeoff"
             self._ev("[추적] 이륙")
+            self._require_flight_link()
+            # takeoff 응답만 유실된 경우에도 착륙 시도를 할 수 있도록 먼저
+            # 비행 가능 상태로 둔다.
+            self.airborne = True
             if not self.dry_run:
                 self._send(self._tello.takeoff)
             else:
                 time.sleep(1.0)
-            self.airborne = True
 
             self.phase = "flying"
             while not self._stop_requested():
@@ -655,6 +882,7 @@ class TelloDriver:
                 self.leg_done += 1
                 self.leg_total = self.leg_done
                 self._ev(f"[추적] 이동 #{self.leg_done}  go({idx}, {idy}, 0, {speed})")
+                self._require_flight_link()
                 self._mark_target(idx, idy, "1순위")   # 전송 직전에 기록
                 if not self.dry_run:
                     self._send(self._tello.go_xyz_speed, idx, idy, 0, speed)
@@ -670,6 +898,10 @@ class TelloDriver:
             self.error = f"{type(e).__name__}: {e}"
             self._ev(f"[추적] 오류 - {self.error}")
         finally:
+            if self._network_failsafe.is_set():
+                self._finish_network_failsafe("추적")
+                return
+
             # 수동 전환 요청이면 착륙하지 않고 그 자리에 떠 있는 채로 넘긴다.
             # 이게 _abort 와 다른 점이다 - _abort 는 무조건 내린다.
             if self._handover.is_set():
@@ -682,17 +914,22 @@ class TelloDriver:
                          f"(유휴 {IDLE_LAND_SEC:.0f}초 후 자동 착륙)")
                 return
 
-            self.phase = "landing"
-            self._ev("[추적] 착륙")
-            try:
-                if not self.dry_run:
-                    self._send(self._tello.land)
-                else:
-                    time.sleep(1.0)
-            except Exception as e:
-                failed = True
-                self.error = f"착륙 실패: {type(e).__name__}: {e}"
-                self._ev(self.error)
+            if self.airborne:
+                self.phase = "landing"
+                self._ev("[추적] 착륙")
+                try:
+                    if not self.dry_run:
+                        self._send(
+                            self._tello.land, _force_link_loss_on_failure=True)
+                    else:
+                        time.sleep(1.0)
+                except Exception as e:
+                    failed = True
+                    self.error = f"착륙 실패: {type(e).__name__}: {e}"
+                    self._ev(self.error)
+            if self._network_failsafe.is_set():
+                self._finish_network_failsafe("추적")
+                return
             self.airborne = False
             if failed:
                 self.result, self.phase = "error", "error"
@@ -705,11 +942,17 @@ class TelloDriver:
 
     def _force_land(self):
         """오류 시 즉시 착륙시킨다."""
+        if self._network_failsafe.is_set():
+            self._finish_network_failsafe("오류 착륙")
+            return
         try:
             if not self.dry_run and self._tello is not None:
-                self._send(self._tello.land)
+                self._send(
+                    self._tello.land, _force_link_loss_on_failure=True)
         except Exception:
-            pass
+            if self._network_failsafe.is_set():
+                self._finish_network_failsafe("오류 착륙")
+                return
         self.airborne = False
         self.phase    = "error"
         self.result   = "error"
@@ -728,6 +971,10 @@ class TelloDriver:
         while True:
             time.sleep(2.0)
             if not self.airborne:
+                continue
+            # 두절 확정 후에는 한 번 더 keepalive/land 를 보내지 않는다.
+            # airborne 은 실제 착륙 여부를 알 수 없어 True 로 남겨둘 수 있다.
+            if self._network_failsafe.is_set():
                 continue
             # 비행 스레드가 명령 중이면 건드리지 않는다. _tx 락이 있어 안전하지만
             # 굳이 go 응답을 기다리며 줄 서 있을 이유가 없다.
@@ -756,6 +1003,9 @@ class TelloDriver:
         """
         if not self.airborne:
             raise RuntimeError("비행 중이 아닙니다")
+        if self._network_failsafe.is_set():
+            self._finish_network_failsafe("수동 전환")
+            return self.status()
         if not self._busy():
             # 이미 스레드가 끝나 떠 있기만 한 상태 (수동 모드 유휴 등)
             self.mode      = "manual"
@@ -775,6 +1025,9 @@ class TelloDriver:
         self._handover.clear()
         self._abort.set()
         self._ev("착륙 요청 (abort)")
+        if self._network_failsafe.is_set():
+            self._finish_network_failsafe("비상 착륙")
+            return self.status()
         if self._busy():
             # 자동 모드는 실행 스레드의 finally 가 착륙시킨다.
             # 수동 모드는 이동이 끝나도 떠 있으므로 여기서 직접 내린다.
@@ -782,13 +1035,17 @@ class TelloDriver:
                 return self.status()
         try:
             if not self.dry_run and self._tello is not None:
-                self._send(self._tello.land)
+                self._send(
+                    self._tello.land, _force_link_loss_on_failure=True)
             self.airborne = False
             self.phase    = "ready"
             if self.mode == "manual":
                 self.result = "completed"
             self._ev("착륙 완료")
         except Exception as e:
+            if self._network_failsafe.is_set():
+                self._finish_network_failsafe("비상 착륙")
+                return self.status()
             self.airborne = False
             self.error = f"{type(e).__name__}: {e}"
             self.phase = "error"
@@ -797,6 +1054,7 @@ class TelloDriver:
 
     # ── 상태 ────────────────────────────────────────────────
     def status(self):
+        now = time.time()
         h = None
         if self.connected and not self.dry_run and not self._busy():
             try:
@@ -814,7 +1072,11 @@ class TelloDriver:
             "cur_x_cm":    round(self.cur_x, 1),
             "cur_y_cm":    round(self.cur_y, 1),
             "running":     self._busy(),
-            "airborne":    self.airborne,    # 수동 모드에서 떠 있는 상태
+            "airborne":    self.airborne,    # link_lost 면 실제 착륙 여부는 unknown
+            "airborne_state": (
+                "unknown" if (self.airborne and self._network_failsafe.is_set())
+                else ("airborne" if self.airborne else "grounded")
+            ),
             "mode":        self.mode,        # auto | manual | track
             # 수동 전환 요청이 걸려 있는가 (진행 중인 이동이 끝나면 넘어감)
             "handover":    self._handover.is_set(),
@@ -829,11 +1091,24 @@ class TelloDriver:
             "target_y_cm":   self.target_y,
             "target_seq":    self.target_seq,
             "target_label":  self.target_label,
-            "target_age_sec": (round(time.time() - self.target_ts, 1)
+            "target_age_sec": (round(now - self.target_ts, 1)
                                if self.target_ts else None),
-            "idle_left":   (round(max(0.0, IDLE_LAND_SEC - (time.time() - self._last_cmd)))
+            "idle_left":   (round(max(0.0, IDLE_LAND_SEC - (now - self._last_cmd)))
                             if (self.airborne and self.phase == "hovering") else None),
-            "result":      self.result,      # completed|aborted|error|incomplete
+            # 응답 확인 기반 링크 상태. dashboard 는 이 값을 표시만 하면 되고,
+            # 별도 통신 계층이나 MQTT 전환은 필요 없다.
+            "link_state":      self._link_state,
+            "link_failures":   self._link_failures,
+            "last_link_ok_age_sec": (
+                round(now - self._last_link_ok, 1) if self._last_link_ok else None
+            ),
+            "last_link_error": self._last_link_error,
+            "network_failsafe": self._network_failsafe.is_set(),
+            "reconnect_in_sec": (
+                round(max(0.0, LINK_RECONNECT_GUARD_SEC - (now - self._link_lost_at)), 1)
+                if self._network_failsafe.is_set() else None
+            ),
+            "result":      self.result,      # completed|aborted|error|incomplete|link_lost
             "error":       self.error,
             "events":      list(self.events[-15:]),
         }

@@ -656,6 +656,7 @@
             title="낙하 판정이 오는 순간 자동 이륙 → 1순위 확률 좌표를 계속 추종">자동 모드</button>
         </div>
         <button class="btn" id="btn-connect" onclick="droneConnect()">연결</button>
+        <div class="why" id="d-link" style="display:none"></div>
 
         <!-- 이륙 지점 = Tello 기체 좌표의 (0,0). 지도 좌하단 모서리에서 재는
              값이라 설치 당일 바닥에서 줄자로 그대로 옮겨 적을 수 있다. -->
@@ -1788,7 +1789,17 @@
     }
 
     // 이륙을 막는 첫 번째 사유. 무언의 비활성 버튼은 만들지 않는다.
+    function flightLinkBlocker(st) {
+      if (!st) return null;
+      if (st.network_failsafe || st.link_state === 'lost' || st.phase === 'link_lost')
+        return '통신 두절 — 자동착륙 대기 (실제 착륙 여부 확인 필요)';
+      if (st.link_state === 'degraded') return '통신 응답 불안정 — 새 비행 명령 보류';
+      return null;
+    }
+
     function startBlocker() {
+      const linkWhy = flightLinkBlocker(droneStatus);
+      if (linkWhy) return linkWhy;
       if (!droneStatus || !droneStatus.connected) return '연결 필요';
       if (droneStatus.running) return '명령 수행 중';
       if (droneStatus.battery != null && droneStatus.battery < 30)
@@ -1978,18 +1989,33 @@
       idle: 'b-grey', connecting: 'b-amber', ready: 'b-blue',
       takeoff: 'b-green', flying: 'b-green', landing: 'b-amber', error: 'b-red',
       // 자동 모드: 이륙은 했는데 아직 1순위 좌표가 없어 제자리에 떠 있는 상태
-      hovering: 'b-green',
+      hovering: 'b-green', link_lost: 'b-red',
     };
     const RESULT_BADGE = {
-      completed: 'b-green', aborted: 'b-amber', incomplete: 'b-amber', error: 'b-red',
+      completed: 'b-green', aborted: 'b-amber', incomplete: 'b-amber', error: 'b-red', link_lost: 'b-red',
     };
     const RESULT_TEXT = {
       completed: '정상 완료', aborted: '사용자 중단',
-      incomplete: '미완', error: '실패',
+      incomplete: '미완', error: '실패', link_lost: '통신 두절 · 착륙 확인 필요',
     };
 
     function renderDrone() {
       const st = droneStatus;
+      const linkWhy = flightLinkBlocker(st);
+      const linkLost = !!(st && (st.network_failsafe || st.link_state === 'lost' || st.phase === 'link_lost'));
+      const reconnectWait = linkLost && st.reconnect_in_sec > 0;
+      const linkEl = document.getElementById('d-link');
+      linkEl.style.display = linkWhy ? '' : 'none';
+      linkEl.textContent = linkWhy
+        ? linkWhy + (linkLost
+          ? (reconnectWait ? ` · 재연결까지 ${Math.ceil(st.reconnect_in_sec)}초` : ' · 착륙 확인 후 재연결하세요')
+          : '')
+        : '';
+      const connectBtn = document.getElementById('btn-connect');
+      if (connectBtn.textContent !== '연결 중...') {
+        connectBtn.disabled = !!reconnectWait;
+        connectBtn.textContent = reconnectWait ? `재연결 대기 (${Math.ceil(st.reconnect_in_sec)}초)` : '연결';
+      }
 
       // [테스트] 낙하 판정 모의 — 이미 시작됐으면 눌러도 아무 일도 안 한다
       const simOn = !!(state && state.sim_started);
@@ -2040,7 +2066,7 @@
 
       // 미션 미리보기. 수동 모드에선 각 지점에 이동 버튼을 붙인다.
       if (mission && mission.points) {
-        const canGo = droneKind === 'manual' && st && st.airborne && !st.running;
+        const canGo = droneKind === 'manual' && st && st.airborne && !st.running && !linkWhy;
         setHTML('mission-list', mission.points.map((p, i) => `
       <div class="mrow">
         <div class="mchip" style="background:${wpColor(p.rank - 1)};color:${C.wpText}">${p.rank}</div>
@@ -2096,7 +2122,8 @@
         // 순서 주의: 떠 있으면 비행 상태를 먼저 보여준다. startBlocker() 는
         // 비행 중이면 '명령 수행 중' 을 돌려주는데, 그걸 먼저 보면 정작
         // 추적 중일 때 '무장 불가' 가 뜬다.
-        if (!autoTrackOn)          { txt = '해제됨'; cls = 'b-grey'; }
+        if (linkWhy)               { txt = linkWhy; cls = 'b-red'; }
+        else if (!autoTrackOn)     { txt = '해제됨'; cls = 'b-grey'; }
         else if (st && st.airborne) {
           // 대기 중에는 제자리 회전으로 "수색 중"을 표현한다. 회전이 꺼졌으면
           // (기수 오차 누적) 그 사실이 배지에 드러나야 한다 — 조용히 멈추면
@@ -2121,15 +2148,16 @@
         const tk = document.getElementById('btn-launch');
         const airborne = !!(st && st.airborne);
         tk.disabled = !!why || airborne;
-        if (armTimer) { tk.textContent = `정말 이륙? (${armLeft})`; tk.className = 'btn arm'; }
+        if (linkLost) { tk.textContent = '착륙 여부 미확인'; tk.className = 'btn'; }
+        else if (armTimer) { tk.textContent = `정말 이륙? (${armLeft})`; tk.className = 'btn arm'; }
         else if (airborne) { tk.textContent = '비행 중'; tk.className = 'btn'; }
         else { tk.textContent = `이륙 (${env})`; tk.className = 'btn go'; }
-        document.getElementById('btn-home').disabled = !airborne || !!(st && st.running);
+        document.getElementById('btn-home').disabled = !airborne || !!(st && st.running) || !!linkWhy;
         // 자취 지우기는 표시만 바꾸므로 지울 게 있으면 언제든 가능
         document.getElementById('btn-clearpath').disabled = !(st && st.path && st.path.length > 1);
         // 유휴 자동착륙 카운트다운
         setText('start-why',
-          airborne && st.idle_left != null ? `${st.idle_left}초 후 자동 착륙` : (why || ''));
+          linkWhy || (airborne && st.idle_left != null ? `${st.idle_left}초 후 자동 착륙` : (why || '')));
       } else {
         const btn = document.getElementById('btn-start');
         btn.disabled = !!why;
@@ -2159,7 +2187,7 @@
       // 비행 중 모드 세그먼트: '수동 이동' 만 살려둔다 (조종 인계용).
       const flying = !!(st && (st.running || st.airborne));
       const km = document.getElementById('k-manual');
-      km.disabled = flying && droneKind === 'manual';
+      km.disabled = linkLost || (flying && droneKind === 'manual');
       km.textContent = (flying && droneKind !== 'manual') ? '수동으로 넘겨받기' : '수동 이동';
       ['k-auto', 'k-track'].forEach(i => {
         document.getElementById(i).disabled = flying;
