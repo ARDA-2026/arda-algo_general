@@ -15,8 +15,9 @@ VERBOSE = True          # False 로 바꾸면 모든 콘솔 출력 중단
 def log(*args):
     if VERBOSE: print(*args)
 
-from shapely.ops import unary_union
-from shapely import contains_xy
+from shapely.ops import unary_union, nearest_points
+from shapely import contains_xy, covers, linestrings
+from shapely.geometry import Point
 import osmnx as ox
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
@@ -263,12 +264,14 @@ def _rebuild_map(print_w=None, print_h=None, scale=None, east_m=None, south_m=No
     MAP_W_M = MAP_PRINT_W * MAP_SCALE          # 지도가 덮는 실제 거리 (동서)
     MAP_H_M = MAP_PRINT_H * MAP_SCALE          # 동일 (남북)
 
-    map_lon_max = MAPO_LON + MAP_EAST_M / M_PER_DEG_LON
+    # 지도는 고정된 기본 위치를 기준으로 한다. 낙하 좌표(MAPO_*)가 바뀌어도
+    # 배경 영역·격자·실물 지도 위 이륙 지점을 함께 옮기지 않는다.
+    map_lon_max = DEFAULT_MAPO_LON + MAP_EAST_M / M_PER_DEG_LON
     map_lon_min = map_lon_max - MAP_W_M / M_PER_DEG_LON
     # 예전에는 입수 지점이 남북으로 정중앙(±MAP_H_M/2)이었는데, 배경 사진
     # 위에서 실제 위치(마포대교 부근)에 별표가 얹히려면 남북도 동서
     # (MAP_EAST_M)처럼 비대칭 여유가 필요해 MAP_SOUTH_M을 추가했다.
-    map_lat_min = MAPO_LAT - MAP_SOUTH_M / M_PER_DEG_LAT
+    map_lat_min = DEFAULT_MAPO_LAT - MAP_SOUTH_M / M_PER_DEG_LAT
     map_lat_max = map_lat_min + MAP_H_M / M_PER_DEG_LAT
 
     # 칸 크기를 먼저 정한 뒤 나눈다. 칸 수를 각각 자르면 큰 지도에서
@@ -327,6 +330,32 @@ def filter_in_river(lons, lats):
     return contains_xy(hangang_union, lons, lats)
 
 
+def advance_particles(delta_lon, delta_lat):
+    """물속 파티클만 이동하고, 육지와 처음 만나는 경계에서 영구 좌초시킨다.
+
+    끝점만 검사하면 좁은 섬을 건너 반대편 물로 나갈 수 있으므로 이동
+    선분 전체를 검사한다. 좌초 파티클은 새 관측/리셋 전까지 다시 움직이지 않는다.
+    """
+    active = np.flatnonzero(in_river)
+    if not active.size:
+        return
+    starts = np.column_stack((particles_lon[active], particles_lat[active]))
+    ends = starts + np.column_stack((delta_lon[active], delta_lat[active]))
+    paths = linestrings(np.stack((starts, ends), axis=1))
+    moving = covers(hangang_union, paths) & filter_in_river(ends[:, 0], ends[:, 1])
+    particles_lon[active[moving]] = ends[moving, 0]
+    particles_lat[active[moving]] = ends[moving, 1]
+
+    boundary = hangang_union.boundary
+    for local in np.flatnonzero(~moving):
+        idx = active[local]
+        contact = nearest_points(Point(starts[local]), paths[local].intersection(boundary))[1]
+        particles_lon[idx], particles_lat[idx] = contact.x, contact.y
+        in_river[idx] = False
+        stranded_lons.append(contact.x)
+        stranded_lats.append(contact.y)
+
+
 def select_spaced(sorted_wps, min_dist_m, max_count):
     """확률 내림차순 waypoint 에서 서로 min_dist_m 이상 떨어진 것만 골라낸다.
 
@@ -350,7 +379,6 @@ def select_spaced(sorted_wps, min_dist_m, max_count):
 
 log("Computing initial river mask...")
 in_river      = filter_in_river(particles_lon, particles_lat)
-in_river_prev = in_river.copy()
 
 # ─────────────────────────────────────────
 # 공유 상태 (시뮬 스레드 ↔ FastAPI)
@@ -368,11 +396,11 @@ sim_started = False
 
 
 def _reset_to_origin(entry_lon: float, entry_lat: float) -> None:
-    """입수 지점을 entry_lon/entry_lat으로 옮기고 파티클·지도·누적 이력을
-    전부 초기화한다. 대기 상태에서 첫 낙하 판정이 왔을 때(POST /report,
+    """입수 지점을 entry_lon/entry_lat으로 옮기고 파티클·누적 이력을
+    초기화한다. 지도 영역은 유지한다. 첫 낙하 판정이 왔을 때(POST /report,
     /observation)와 POST /reset(기본 지점으로) 둘 다 이 함수를 쓴다 —
     sim_started를 True/False 어느 쪽으로 할지는 호출부가 정한다."""
-    global particles_lon, particles_lat, pvlon, pvlat, in_river_prev
+    global particles_lon, particles_lat, pvlon, pvlat, in_river
     global elapsed_sec, best_trail_lons, best_trail_lats
     global stranded_lons, stranded_lats, observation, obs_history
     global new_observation, _step, last_printed_time
@@ -387,8 +415,8 @@ def _reset_to_origin(entry_lon: float, entry_lat: float) -> None:
     pvlon[:] = velocity_x / 88000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 88000,  N)
     pvlat[:] = velocity_y / 111000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 111000, N)
 
-    # 지도 원점이 바뀌었으니 격자·누적 히트맵·(기본값이면) 이륙 지점을
-    # 새 원점 기준으로 다시 계산한다.
+    # 현재 지도 설정을 유지하면서 누적 히트맵을 초기화한다.
+    # 지도 영역과 이륙 지점은 낙하 좌표를 따라 이동하지 않는다.
     _rebuild_map()
 
     elapsed_sec = 0.0
@@ -401,14 +429,14 @@ def _reset_to_origin(entry_lon: float, entry_lat: float) -> None:
     new_observation = None  # 리셋과 동시에 대기 중이던 재감지 관측값은 폐기
     _step = 0
     last_printed_time = -PRINT_INTERVAL
-    in_river_prev = filter_in_river(particles_lon, particles_lat)
+    in_river = filter_in_river(particles_lon, particles_lat)
 
 
 # ─────────────────────────────────────────
 # 시뮬레이션 스텝
 # ─────────────────────────────────────────
 def simulation_step():
-    global particles_lon, particles_lat, in_river, in_river_prev
+    global particles_lon, particles_lat, in_river
     global elapsed_sec, accumulated_hist
     global best_trail_lons, best_trail_lats
     global pvlon, pvlat
@@ -471,6 +499,7 @@ def simulation_step():
             r = np.random.uniform(0, RADIUS_OBS, N)
             particles_lon[:] = obs_lon + r * np.cos(a)
             particles_lat[:] = obs_lat + r * np.sin(a)
+            in_river = filter_in_river(particles_lon, particles_lat)
             pvlon[:] = velocity_x / 88000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 88000,  N)
             pvlat[:] = velocity_y / 111000 + np.random.normal(0, abs(velocity_x) * TURBULENCE / 111000, N)
             accumulated_hist[:] = 0
@@ -534,8 +563,10 @@ def simulation_step():
 
     # ── SPEED 루프  ──
     for _ in range(SPEED):
-        particles_lon += pvlon * DT + np.random.normal(0, DIFFUSIVITY, N)
-        particles_lat += pvlat * DT + np.random.normal(0, DIFFUSIVITY, N)
+        advance_particles(
+            pvlon * DT + np.random.normal(0, DIFFUSIVITY, N),
+            pvlat * DT + np.random.normal(0, DIFFUSIVITY, N),
+        )
 
         pvlon += np.random.normal(0, abs(velocity_x) * 0.05 / 88000,  N)
         pvlat += np.random.normal(0, abs(velocity_x) * 0.05 / 111000, N)
@@ -545,14 +576,6 @@ def simulation_step():
 
         elapsed_sec += DT
         _step       += 1
-
-        if _step % 5 == 0:
-            in_river_prev  = in_river.copy()
-            in_river       = filter_in_river(particles_lon, particles_lat)
-            newly_stranded = in_river_prev & ~in_river
-            if newly_stranded.any():
-                stranded_lons.extend(particles_lon[newly_stranded].tolist())
-                stranded_lats.extend(particles_lat[newly_stranded].tolist())
 
     # ── 히트맵 / 웨이포인트  ──
     lons_v = particles_lon[in_river]
