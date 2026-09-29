@@ -858,14 +858,16 @@ async def post_takeoff_reset():
 
 class MapIn(BaseModel):
     # 실물 지도 크기(m)와 축척. 덮는 실제 거리는 둘의 곱으로 정해진다.
-    # east_m/south_m 기본값은 배경 사진(static/mapomap.jpg) 속 마포대교
-    # 위치에 입수 지점 별표가 얹히도록 맞춘 값이다 — MAP_EAST_M/MAP_SOUTH_M
-    # 정의부(위쪽) 주석 참고.
-    width_m:  float = Field(3.0,   ge=0.3, le=20.0)
-    height_m: float = Field(2.0,   ge=0.3, le=20.0)
-    scale:    float = Field(150.0, ge=10.0, le=2000.0)
-    east_m:   float = Field(151.8, ge=0.0, le=5000.0)  # 입수 지점에서 동쪽 여유
-    south_m:  float = Field(91.4,  ge=0.0, le=5000.0)  # 입수 지점에서 남쪽 여유
+    # 기본값은 하드코딩하지 않고 DEFAULT_MAP_CFG(현재 운영 중인 1:600 확정
+    # 값)를 그대로 참조한다 — 예전에 여기 숫자를 따로 박아뒀다가 위쪽
+    # MAP_SCALE/MAP_EAST_M/MAP_SOUTH_M 이 바뀐 뒤에도 안 따라와서, 편집
+    # UI가 없어도 이 엔드포인트를 값 없이(curl 등으로) 호출하면 조용히
+    # 옛날 축척(1:150)으로 되돌아가는 위험이 있었다.
+    width_m:  float = Field(DEFAULT_MAP_CFG["print_w"], ge=0.3, le=20.0)
+    height_m: float = Field(DEFAULT_MAP_CFG["print_h"], ge=0.3, le=20.0)
+    scale:    float = Field(DEFAULT_MAP_CFG["scale"],   ge=10.0, le=2000.0)
+    east_m:   float = Field(DEFAULT_MAP_CFG["east_m"],  ge=0.0, le=5000.0)  # 입수 지점에서 동쪽 여유
+    south_m:  float = Field(DEFAULT_MAP_CFG["south_m"], ge=0.0, le=5000.0)  # 입수 지점에서 남쪽 여유
 
 
 @app.post("/map")
