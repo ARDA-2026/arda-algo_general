@@ -394,15 +394,35 @@ def warm(lon_min, lat_min, lon_max, lat_max) -> None:
                      daemon=True).start()
 
 
-if __name__ == "__main__":       # python basemap.py <lon_min> <lat_min> <lon_max> <lat_max>
+if __name__ == "__main__":
     import sys
     from dotenv import load_dotenv
 
     load_dotenv()
-    if len(sys.argv) != 5:
-        print("usage: python basemap.py <lon_min> <lat_min> <lon_max> <lat_max>")
+    args = [a for a in sys.argv[1:] if a != "--force"]
+    force = "--force" in sys.argv
+
+    if not args:
+        # 인자가 없으면 서버가 실제로 쓰는 영역을 그대로 가져온다.
+        #
+        # 손으로 반올림한 bbox 를 넣으면 안 된다. 캐시 키가 좌표 6자리라
+        # 126.92097 과 126.920974 는 다른 파일이 되고, 미리 구워 놔도 서버가
+        # 켜질 때 "없네" 하고 다시 굽는다 (실제로 겪었다). 시연 전에 미리
+        # 받아두려는 게 목적이므로 그러면 아무 의미가 없다.
+        print("지도 영역을 hanriver.py 에서 읽는 중...")
+        import hanriver
+        box = [hanriver.map_lon_min, hanriver.map_lat_min,
+               hanriver.map_lon_max, hanriver.map_lat_max]
+        print(f"  {box[0]:.6f},{box[1]:.6f} ~ {box[2]:.6f},{box[3]:.6f}"
+              f"  (1:{hanriver.MAP_SCALE:.0f})")
+    elif len(args) == 4:
+        box = [float(v) for v in args]
+    else:
+        print("usage: python basemap.py [--force]")
+        print("       python basemap.py <lon_min> <lat_min> <lon_max> <lat_max> [--force]")
+        print("  인자 없이 쓰는 쪽을 권장한다 — 서버와 같은 영역을 보장한다.")
         raise SystemExit(2)
-    box = [float(v) for v in sys.argv[1:5]]
-    p = ensure(*box, force=True)
+
+    p = ensure(*box, force=force)
     print(json.dumps(status(), ensure_ascii=False, indent=2))
     raise SystemExit(0 if p else 1)
