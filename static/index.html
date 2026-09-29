@@ -55,16 +55,6 @@
       position: relative;
     }
 
-    #navermap {
-      position: absolute;
-      inset: 0;
-      /* 네이버 Map 생성자가 컨테이너의 position 을 relative 로 덮어쓴다.
-         그러면 inset:0 이 크기가 아니라 오프셋이 되어 높이가 auto(=0) 로
-         무너진다 (실측: bounds 위도 범위 0, zoom 6). 크기를 직접 준다. */
-      width: 100%;
-      height: 100%;
-      z-index: 0;
-    }
     canvas {
       position: absolute;
       inset: 0;
@@ -74,9 +64,9 @@
       cursor: crosshair;
       z-index: 1;
     }
-    /* 네이버 지도가 살아 있으면 뷰 조작(드래그·줌)은 지도가 담당한다.
-       캔버스는 그림만 얹고 포인터 이벤트를 통과시킨다. */
-    body.navermap-on canvas { pointer-events: none; }
+    /* 시점은 실물 지도 영역에 고정이다. 화면과 바닥 인쇄물이 어긋나면
+       시연 중에 알아채기 어려우므로 전체/따라가기 같은 뷰 조작은 감춘다. */
+    .view-ctl { display: none; }
 
     #toolbar {
       position: absolute;
@@ -553,10 +543,6 @@
 <body>
 
   <div id="canvas-wrap">
-    <!-- 네이버 지도. 캔버스 뒤에 깔리고, 투영의 기준이 된다.
-         키가 없거나 로드에 실패하면 비어 있는 채로 남고 캔버스가 자체
-         투영 + 오프라인 배경 사진으로 폴백한다. -->
-    <div id="navermap"></div>
     <canvas id="c"></canvas>
 
     <div id="toolbar">
@@ -857,50 +843,53 @@
     let W = 1, H = 1;
     let state = null, autoFollow = false;
 
-    // 실물 지도 배경 사진(마포/밤섬 항공뷰) — 지도 사각형(m.lon_min~lon_max,
-    // m.lat_min~lat_max) 안을 그대로 채워서 드론 활동 지도로 쓴다. 로드되기
-    // 전에는 그리지 않고(mapBgLoaded), 로드가 끝나면 그 프레임을 다시
-    // 그리도록 requestRender()를 한 번 걸어준다.
-    let mapBgLoaded = false;
+    // 실물 지도 배경 — 서버(basemap.py)가 네이버 Static Map 으로 받아
+    // "지도 사각형 bbox 에 정확히 맞는 등장방형 이미지" 로 구워 둔 것이다.
+    //
+    // 온라인이든 오프라인이든 이 파일 한 장을 쓴다. 예전처럼 온라인에서만
+    // 네이버 JS 지도를 깔면 투영 주인이 바뀌어(UTMK vs 등장방형) 같은
+    // 위경도가 다른 픽셀에 찍힌다. 시연장에 인터넷이 없을 수 있으므로
+    // 그 갈림 자체를 없앴다.
+    //
+    // 로드 전에는 그리지 않고(mapBgLoaded), 끝나면 그 프레임을 다시 그린다.
+    let mapBgLoaded = false, mapBgPhoto = false, mapBgRetried = false, mapBgKey = '';
     const mapBgImg = new Image();
-    mapBgImg.onload = () => { mapBgLoaded = true; requestRender(); };
-    mapBgImg.src = '/static/mapomap.jpg';
+    mapBgImg.onload = () => {
+      mapBgLoaded = true;
+      if (!mapBgPhoto) setMapBadge('지도: 네이버', true);
+      requestRender();
+    };
+    mapBgImg.onerror = () => {
+      if (mapBgPhoto) return;             // 예비 사진마저 실패 — 더 할 게 없다
+      mapBgPhoto = true;
+      setMapBadge('지도: 예비 사진', false);
+      setText('hint', '네이버 배경을 못 받았습니다 — 서버 로그나 /config 의 basemap.detail 확인');
+      mapBgImg.src = '/static/mapomap.jpg';
+      // 서버가 아직 굽는 중일 수 있다(첫 실행은 네이버 왕복 여러 번). 한 번만 더 묻는다.
+      if (!mapBgRetried) { mapBgRetried = true; setTimeout(() => setMapBackground(mapBgKey), 8000); }
+    };
+    // 지도 영역이 바뀌면 배경도 바뀐다. key 를 쿼리에 실어 브라우저가
+    // 옛 영역의 그림을 재사용하지 못하게 한다.
+    function setMapBackground(key) {
+      mapBgKey = key; mapBgPhoto = false; mapBgLoaded = false;
+      mapBgImg.src = '/map/background?v=' + encodeURIComponent(key);
+    }
 
     // 경도 1° 와 위도 1° 의 실제 길이가 다르므로(88km vs 111km) 화면에도 그 비율을
     // 반영해야 실물 지도 사각형이 정확한 3:2 로 보인다.
     // ── 투영 ──────────────────────────────────────
-    // 위경도 <-> 캔버스 픽셀 변환을 누가 소유하는가.
+    // 위경도 <-> 캔버스 픽셀. 등장방형 근사 하나뿐이다.
     //
-    //   naverMap 이 살아 있으면  : 네이버(Web Mercator)가 기준.
-    //     지도 사각형이 자기 위경도가 찍히는 픽셀에 자동으로 놓이므로,
-    //     배경과 파티클·waypoint 정합을 손으로 맞출 일이 없다.
-    //   없으면(키 없음/오프라인) : 아래 등장방형 근사로 폴백.
-    //     mapomap.jpg 를 지도 사각형에 늘려 채우던 기존 동작 그대로.
+    // 예전에는 네이버 JS 지도가 살아 있으면 그쪽(UTMK)이 투영의 주인이 되고,
+    // 키가 없거나 오프라인이면 여기로 폴백했다. 두 투영은 같은 위경도를 다른
+    // 픽셀에 찍는다 — 온/오프라인에서 화면이 갈렸고, 실제 위경도 기준으로
+    // 도는 좌초 판정과도 어긋나 보였다.
     //
-    // 그리기 함수들은 toCanvas/fromCanvas 만 쓰므로 이 분기를 모른다.
-    // ── 투영 ──────────────────────────────────────
-    // 위경도 <-> 캔버스 픽셀 변환을 누가 소유하는가.
-    //
-    //   naverMap 이 살아 있으면  : 네이버가 기준. 지도 사각형이 자기 위경도가
-    //     찍히는 픽셀에 자동으로 놓이므로 정합을 손으로 맞출 일이 없다.
-    //   없으면(키 없음/오프라인) : 아래 등장방형 근사로 폴백.
-    //
-    // 네이버 좌표를 점마다 부르지는 않는다. 히트맵만 격자 4천 칸 x 2회라
-    // 프레임당 8천 번인데, 그때마다 LatLng 객체를 만들면 버벅인다.
-    // 대신 프레임당 3점만 물어보고 아핀 변환을 맞춘 뒤, 나머지는 순수 산술로
-    // 푼다. 네이버 기본 투영이 UTMK(횡축 메르카토르)라 경도->x 가 선형이
-    // 아니고 격자 수렴각만큼 살짝 돌아가 있는데, 아핀은 회전까지 담으므로
-    // 화면 범위에서는 오차가 픽셀 아래다.
+    // 지금은 배경 자체가 서버에서 이 좌표계로 구워져 오므로(basemap.py),
+    // 투영이 하나여도 배경·파티클·waypoint 가 전부 같은 자리에 온다.
     const proj = { lon0: 0, lat0: 0, mx: 1, my: 1 };
-    // 아핀 계수: [x,y] = [x0,y0] + M * [lon-lon0, lat-lat0]
-    const aff = { ok: false, lon0: 0, lat0: 0, x0: 0, y0: 0,
-                  xLon: 1, xLat: 0, yLon: 0, yLat: 1, det: 1 };
-    let naverMap = null;          // naver.maps.Map (없으면 폴백)
-    let affWarned = false;
 
     function updateProjection() {
-      if (naverMap && fitAffine()) return;
-      aff.ok = false;
       const spanE = (view.lonMax - view.lonMin) * M_LON;
       const spanN = (view.latMax - view.latMin) * M_LAT;
       const ppm = Math.min(W / spanE, H / spanN);   // 요청 영역이 다 들어가도록
@@ -910,76 +899,15 @@
       proj.lat0 = (view.latMin + view.latMax) / 2 - (H / 2) / proj.my;
     }
 
-    // 네이버 투영을 3점 샘플해 아핀 계수를 맞춘다. 성공하면 true.
-    function fitAffine() {
-      try {
-        const pr = naverMap.getProjection();
-        const b  = naverMap.getBounds();
-        if (!pr || !b) return false;
-        const sw = b.getSW(), ne = b.getNE();
-        const dLon = ne.lng() - sw.lng(), dLat = ne.lat() - sw.lat();
-        if (!(Math.abs(dLon) > 1e-12 && Math.abs(dLat) > 1e-12)) return false;
-
-        const at = (lat, lng) => pr.fromCoordToOffset(new naver.maps.LatLng(lat, lng));
-        const p0 = at(sw.lat(), sw.lng());
-        const p1 = at(sw.lat(), ne.lng());     // 경도만 변화
-        const p2 = at(ne.lat(), sw.lng());     // 위도만 변화
-
-        aff.lon0 = sw.lng(); aff.lat0 = sw.lat();
-        aff.x0 = p0.x;       aff.y0 = p0.y;
-        aff.xLon = (p1.x - p0.x) / dLon;  aff.xLat = (p2.x - p0.x) / dLat;
-        aff.yLon = (p1.y - p0.y) / dLon;  aff.yLat = (p2.y - p0.y) / dLat;
-        aff.det  = aff.xLon * aff.yLat - aff.xLat * aff.yLon;
-        if (!isFinite(aff.det) || Math.abs(aff.det) < 1e-12) return false;
-
-        // 자기 검증: 지도 중심은 캔버스 한가운데에 찍혀야 한다.
-        // fromCoordToOffset 이 컨테이너 기준이 아니면 여기서 크게 어긋난다.
-        aff.ok = true;
-        const c = naverMap.getCenter();
-        const [cx, cy] = toCanvas(c.lng(), c.lat());
-        if (Math.abs(cx - W / 2) > 4 || Math.abs(cy - H / 2) > 4) {
-          aff.ok = false;
-          if (!affWarned) {
-            affWarned = true;
-            console.warn('네이버 투영 정합 실패 — 중심이 ' +
-              `(${cx.toFixed(0)}, ${cy.toFixed(0)}) 로 나옴 (기대 ` +
-              `${(W / 2).toFixed(0)}, ${(H / 2).toFixed(0)}). 폴백 투영을 씁니다.`);
-          }
-          return false;
-        }
-        return true;
-      } catch (e) {
-        if (!affWarned) { affWarned = true; console.warn('네이버 투영 오류:', e.message); }
-        return false;
-      }
-    }
-
     function toCanvas(lon, lat) {
-      if (aff.ok) {
-        const dl = lon - aff.lon0, dt = lat - aff.lat0;
-        return [aff.x0 + aff.xLon * dl + aff.xLat * dt,
-                aff.y0 + aff.yLon * dl + aff.yLat * dt];
-      }
       return [(lon - proj.lon0) * proj.mx, H - (lat - proj.lat0) * proj.my];
     }
     function fromCanvas(px, py) {
-      if (aff.ok) {
-        const dx = px - aff.x0, dy = py - aff.y0;
-        return { lon: aff.lon0 + ( aff.yLat * dx - aff.xLat * dy) / aff.det,
-                 lat: aff.lat0 + (-aff.yLon * dx + aff.xLon * dy) / aff.det };
-      }
       return { lon: proj.lon0 + px / proj.mx, lat: proj.lat0 + (H - py) / proj.my };
     }
 
     function setView(lonMin, lonMax, latMin, latMax) {
       view = { lonMin, lonMax, latMin, latMax };
-      // 지도 모드에서는 뷰의 주인이 네이버다. view 는 폴백용으로만 갱신하고
-      // 실제 화면은 지도를 움직여서 맞춘다.
-      if (naverMap) {
-        naverMap.fitBounds(new naver.maps.LatLngBounds(
-          new naver.maps.LatLng(latMin, lonMin),
-          new naver.maps.LatLng(latMax, lonMax)));
-      }
       updateProjection();
     }
 
@@ -1004,12 +932,13 @@
     function fitToMap() {
       const m = state && state.map;
       if (!m) return;
-      const f = naverMap ? 0.01 : 0.15;
-      const padL = (m.lon_max - m.lon_min) * f, padT = (m.lat_max - m.lat_min) * f;
-      setView(m.lon_min - padL, m.lon_max + padL, m.lat_min - padT, m.lat_max + padT);
-      // fitBounds 로 맞춘 뒤 원하는 만큼 더 당긴다. 중심은 영역 중심 그대로라
-      // 사각형이 가운데를 유지한 채 커진다.
-      if (naverMap && viewZoom) naverMap.setZoom(naverMap.getZoom() + viewZoom, false);
+      // 영역 전체를 담고(여유 2%), 거기서 viewZoom 단계만큼 더 당긴다.
+      // 중심은 영역 중심 그대로라 사각형이 가운데를 유지한 채 커진다.
+      const z = Math.pow(2, viewZoom);
+      const cLon = (m.lon_min + m.lon_max) / 2, cLat = (m.lat_min + m.lat_max) / 2;
+      const hLon = (m.lon_max - m.lon_min) / 2 * 1.02 / z;
+      const hLat = (m.lat_max - m.lat_min) / 2 * 1.02 / z;
+      setView(cLon - hLon, cLon + hLon, cLat - hLat, cLat + hLat);
       autoFollow = false;
       document.getElementById('btn-follow').classList.remove('active');
       requestRender();
@@ -1019,40 +948,16 @@
       document.getElementById('btn-follow').classList.toggle('active', autoFollow);
       requestRender();
     }
-    function zoomAt(deltaZ, cx, cy) {
-      if (naverMap) {
-        // 지도 배율만 바꾼다. 실물 지도 영역(인쇄물)은 건드리지 않는다.
-        viewZoom = Math.min(3, Math.max(-2, viewZoom + (deltaZ > 0 ? 1 : -1)));
-        try { localStorage.setItem('viewZoom', String(viewZoom)); } catch (e) {}
-        fitToMap();
-        setText('hint', viewZoom
-          ? `지도 배율 ${viewZoom > 0 ? '+' : ''}${viewZoom} — 실물 지도 영역은 그대로입니다`
-          : '지도 배율 기본 — 실물 지도 영역 전체가 보입니다');
-        return;
-      }
-      const factor = Math.pow(2, -deltaZ * 0.8);
-      const p = (cx !== undefined) ? fromCanvas(cx, cy)
-        : { lon: (view.lonMin + view.lonMax) / 2, lat: (view.latMin + view.latMax) / 2 };
-      view.lonMin = p.lon + (view.lonMin - p.lon) * factor;
-      view.lonMax = p.lon + (view.lonMax - p.lon) * factor;
-      view.latMin = p.lat + (view.latMin - p.lat) * factor;
-      view.latMax = p.lat + (view.latMax - p.lat) * factor;
-      if (cx !== undefined) {
-        // 최소맞춤 투영은 레터박스가 생기므로, 커서 아래 지점이 제자리에 남도록 보정
-        updateProjection();
-        const [nx, ny] = toCanvas(p.lon, p.lat);
-        const dLon = (nx - cx) / proj.mx, dLat = (cy - ny) / proj.my;
-        view.lonMin += dLon; view.lonMax += dLon;
-        view.latMin += dLat; view.latMax += dLat;
-      }
-      updateProjection();
-      requestRender();
-    }
-    function panBy(dLon, dLat) {
-      view.lonMin += dLon; view.lonMax += dLon;
-      view.latMin += dLat; view.latMax += dLat;
-      updateProjection();
-      requestRender();
+    // 시점은 실물 지도 영역에 고정한다. 자유롭게 끌거나 줌하면 화면과 바닥
+    // 인쇄물이 어긋난 걸 눈치채기 어려워서, 영역 전체를 기준으로 한 단계씩만
+    // 당기고 미는 것으로 제한한다.
+    function zoomAt(deltaZ) {
+      viewZoom = Math.min(3, Math.max(-2, viewZoom + (deltaZ > 0 ? 1 : -1)));
+      try { localStorage.setItem('viewZoom', String(viewZoom)); } catch (e) {}
+      fitToMap();
+      setText('hint', viewZoom
+        ? `지도 배율 ${viewZoom > 0 ? '+' : ''}${viewZoom} — 실물 지도 영역은 그대로입니다`
+        : '지도 배율 기본 — 실물 지도 영역 전체가 보입니다');
     }
 
     // ─────────────────────────────────────────────
@@ -1070,7 +975,6 @@
       drag.on = true; drag.moved = false;
       drag.x0 = e.clientX; drag.y0 = e.clientY;
       drag.lon0 = view.lonMin; drag.lat0 = view.latMin;
-      canvas.style.cursor = 'grabbing';
     });
 
     window.addEventListener('mousemove', e => {
@@ -1078,17 +982,10 @@
       const { lon, lat } = fromCanvas(px, py);
       setText('coords', `lat ${lat.toFixed(5)}  lon ${lon.toFixed(5)}`);
       if (!drag.on) return;
-
+      // 끌어서 옮기지는 않는다. 움직였는지만 기억해 두었다가 클릭과 구분한다
+      // (조금 밀린 채 손을 떼면 관측값/이륙 지점이 엉뚱한 데 찍힌다).
       const dx = e.clientX - drag.x0, dy = e.clientY - drag.y0;
-      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
-        drag.moved = true;
-        if (autoFollow) { autoFollow = false; document.getElementById('btn-follow').classList.remove('active'); }
-      }
-      const span = view.lonMax - view.lonMin, spanLat = view.latMax - view.latMin;
-      view.lonMin = drag.lon0 - dx / proj.mx; view.lonMax = view.lonMin + span;
-      view.latMin = drag.lat0 + dy / proj.my; view.latMax = view.latMin + spanLat;
-      updateProjection();
-      requestRender();
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) drag.moved = true;
     });
 
     window.addEventListener('mouseup', e => {
@@ -1212,21 +1109,14 @@
 
     canvas.addEventListener('wheel', e => {
       e.preventDefault();
-      const [cx, cy] = canvasPos(e);
-      zoomAt(e.deltaY > 0 ? -0.3 : 0.3, cx, cy);
-      if (autoFollow) { autoFollow = false; document.getElementById('btn-follow').classList.remove('active'); }
+      zoomAt(e.deltaY > 0 ? -0.3 : 0.3);
     }, { passive: false });
 
     window.addEventListener('keydown', e => {
       // 드론 파라미터 입력칸에서 r/f/m 이 뷰를 건드리면 안 된다
       if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
-      const PL = (view.lonMax - view.lonMin) * 0.15, PT = (view.latMax - view.latMin) * 0.15;
       const k = e.key.toLowerCase();
-      if (e.key === 'ArrowLeft') panBy(-PL, 0);
-      else if (e.key === 'ArrowRight') panBy(+PL, 0);
-      else if (e.key === 'ArrowUp') panBy(0, +PT);
-      else if (e.key === 'ArrowDown') panBy(0, -PT);
-      else if (e.key === '+' || e.key === '=') zoomAt(0.5);
+      if (e.key === '+' || e.key === '=') zoomAt(0.5);
       else if (e.key === '-') zoomAt(-0.5);
       else if (k === 'r') resetView();
       else if (k === 'f') toggleFollow();
@@ -1275,9 +1165,6 @@
     // 좌표 격자·강 폴리곤 등 예전에 배경으로 그리던 요소는 다 걷어내고, 이
     // 사진 하나만 지도 사각형의 배경이 된다(사각형 밖은 계속 스크림 처리).
     function drawMapBackground(m) {
-      // 네이버 지도가 살아 있으면 배경은 그쪽이 담당한다. 사진을 겹쳐 그리면
-      // 정합이 맞는 지도 위에 안 맞는 사진을 덮어씌우는 꼴이 된다.
-      if (naverMap) return;
       if (!m || !mapBgLoaded) return;
       const [x1, y1] = toCanvas(m.lon_min, m.lat_max);
       const [x2, y2] = toCanvas(m.lon_max, m.lat_min);
@@ -1293,9 +1180,9 @@
       ctx.beginPath();
       ctx.rect(0, 0, W, H);
       ctx.rect(x1, y1, x2 - x1, y2 - y1);
-      // 지도 모드에서는 배경이 위성 사진이라 테마 스크림(밝은 테마는 흰색
-      // 68%)을 쓰면 지도가 통째로 하얗게 날아간다. 어둡고 옅게 덮는다.
-      ctx.fillStyle = naverMap ? 'rgba(8,12,18,0.42)' : C.scrim;
+      // 배경이 실제 지도라 테마 스크림(밝은 테마는 흰색 68%)을 쓰면 지도가
+      // 통째로 하얗게 날아간다. 어둡고 옅게 덮는다.
+      ctx.fillStyle = 'rgba(8,12,18,0.42)';
       ctx.fill('evenodd');
       ctx.restore();
     }
@@ -1691,21 +1578,13 @@
       if (!state || state.elapsed_sec === undefined) return;
       const s = state, m = s.map;
 
-      if (autoFollow && s.best_lon != null) {
-        if (naverMap) {
-          // 지도 모드는 시점 고정이다. 따라가기가 화면을 움직이면 인쇄물과
-          // 어긋난다 — 최고 확률 지점은 지도 위 ◆ 마커로 이미 보인다.
-        } else {
-          const lw = view.lonMax - view.lonMin, lh = view.latMax - view.latMin;
-          view.lonMin = s.best_lon - lw / 2; view.lonMax = s.best_lon + lw / 2;
-          view.latMin = s.best_lat - lh / 2; view.latMax = s.best_lat + lh / 2;
-        }
-      }
+      // 따라가기는 시점을 움직이지 않는다. 시점이 실물 지도 영역에 고정돼
+      // 있어야 화면과 바닥 인쇄물이 계속 맞는다 — 최고 확률 지점은 ◆ 마커로
+      // 이미 보인다.
       updateProjection();
 
       ctx.clearRect(0, 0, W, H);
-      // 지도 모드에서는 캔버스가 투명해야 뒤에 깔린 지도가 보인다.
-      if (!naverMap) { ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H); }
+      ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
 
       drawMapBackground(m);
       drawMapScrim(m);
@@ -2348,10 +2227,7 @@
       canvas.width = Math.round(W * dpr);
       canvas.height = Math.round(H * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      if (naverMap) {
-        naver.maps.Event.trigger(naverMap, 'resize');
-        fitToMap();      // 시점 고정 — 창이 바뀌어도 실물 지도 영역을 유지한다
-      }
+      fitToMap();        // 시점 고정 — 창이 바뀌어도 실물 지도 영역을 유지한다
       updateProjection();
       requestRender();
     }
@@ -2473,7 +2349,11 @@
         }
         if (d.map) {
           const key = [d.map.lon_min, d.map.lat_min, d.map.lon_max, d.map.lat_max].join(',');
-          if (!mapFitted || key !== lastMapKey) { mapFitted = true; lastMapKey = key; fitToMap(); }
+          if (!mapFitted || key !== lastMapKey) {
+            mapFitted = true; lastMapKey = key;
+            setMapBackground(key);     // 배경은 영역 bbox 에 맞춰 구워진다
+            fitToMap();
+          }
         }
         requestRender();
       };
@@ -2489,131 +2369,31 @@
       el.className = 'tbtn' + (ok ? ' active' : '');
     }
 
-    function loadScript(src, timeoutMs) {
-      return new Promise((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error('로드 시간 초과')), timeoutMs);
-        const el = document.createElement('script');
-        el.src = src;
-        el.onload = () => { clearTimeout(t); resolve(); };
-        el.onerror = () => { clearTimeout(t); reject(new Error('스크립트 로드 실패')); };
-        document.head.appendChild(el);
-      });
-    }
-
-    async function initNaverMap() {
-      let cid = '';
+    // 배경 지도 상태를 화면에 반영한다. 실제 그림은 setMapBackground() 가
+    // /map/background 를 받아 오고, 배지는 그 결과(onload/onerror)로 바뀐다.
+    // 여기서는 서버가 왜 못 구웠는지를 사람이 읽을 수 있게 남기는 일만 한다.
+    async function initBasemap() {
+      let b = {};
       try {
         const cfg = await api('/config');
-        cid = (cfg && cfg.naver_map_client_id) || '';
-      } catch (e) { /* 서버가 늦게 뜨면 폴백 */ }
+        b = (cfg && cfg.basemap) || {};
+      } catch (e) { return; }               // 서버가 늦게 뜨면 그냥 넘어간다
 
-      if (!cid) {
-        fallbackToPhoto('키 없음 (.env 의 NAVER_MAP_CLIENT_ID)');
-        return;
-      }
-      let stage = '스크립트 로드';
-      try {
-        await loadScript(
-          'https://oapi.map.naver.com/openapi/v3/maps.js?ncpKeyId=' + encodeURIComponent(cid), 8000);
-        if (!window.naver || !naver.maps) throw new Error('naver.maps 없음 (키/도메인 확인)');
-        stage = 'Map 생성';
-
-        const c = { lat: (view.latMin + view.latMax) / 2, lng: (view.lonMin + view.lonMax) / 2 };
-        naverMap = new naver.maps.Map('navermap', {
-          center: new naver.maps.LatLng(c.lat, c.lng),
-          zoom: 15,
-          // 일반 지도가 기본이다. 강이 파랗게 칠해져 육지 경계가 또렷해서
-          // 파티클 좌초 판정과 대조하기 좋다. 위성은 배지를 눌러 전환한다.
-          mapTypeId: naver.maps.MapTypeId.NORMAL,
-          // 축척바는 우리가 캔버스에 "인쇄 0.5m = 실제 Xm" 로 그린다.
-          // 네이버 축척바(화면상 거리)와 나란히 뜨면 뜻이 달라 헷갈린다.
-          logoControl: true, mapDataControl: false, scaleControl: false,
-          // 화면은 "실물 지도 영역" 에 고정한다. 끌거나 줌해서 시점이 틀어지면
-          // 화면과 바닥의 인쇄물이 어긋난 걸 눈치채기 어렵다.
-          // 영역 자체는 '실물 지도' 카드의 km / 영역 밀기로 바꾼다.
-          draggable: false, keyboardShortcuts: false,
-          scrollWheel: false, disableDoubleClickZoom: true, disableDoubleTapZoom: true,
-          pinchZoom: false, disableKineticPan: true, zoomControl: false,
-        });
-        document.body.classList.add('navermap-on');
-        stage = '이벤트 연결';
-
-        // 지도가 움직이면 캔버스도 다시 그린다. 투영이 지도에 묶여 있으므로
-        // 이걸 빠뜨리면 파티클이 배경과 따로 논다.
-        ['idle', 'bounds_changed', 'zoom_changed', 'center_changed'].forEach(ev =>
-          naver.maps.Event.addListener(naverMap, ev, () => {
-            requestRender();
-          }));
-
-        // 캔버스가 pointer-events:none 이 되므로 클릭도 지도에서 받는다.
-        // 지도가 주는 좌표를 바로 쓰니 fromCanvas 왕복이 필요 없다.
-        naver.maps.Event.addListener(naverMap, 'click', e => {
-          onMapPick(e.coord.lng(), e.coord.lat());
-        });
-
-        setMapBadge('지도: 네이버', true);
-        // 시점이 고정이라 뷰 조작 버튼은 할 일이 없다. 남겨두면 눌러보고
-        // "안 먹는다" 고 오해한다.
-        document.querySelectorAll('.view-ctl').forEach(el => { el.style.display = 'none'; });
-        setText('hint', '시점은 실물 지도 영역에 고정 — 영역은 오른쪽 "실물 지도" 카드에서 바꿉니다');
-        // 브라우저 콘솔에서 정합을 바로 확인할 수 있게 남긴다.
-        naver.maps.Event.addListener(naverMap, 'init', () => {
-          const b2 = naverMap.getBounds();
-          console.info('[지도] 네이버 준비됨 zoom=' + naverMap.getZoom()
-            + ' bounds=' + b2.getSW().lng().toFixed(5) + ',' + b2.getSW().lat().toFixed(5)
-            + ' ~ ' + b2.getNE().lng().toFixed(5) + ',' + b2.getNE().lat().toFixed(5)
-            + '  아핀정합=' + (aff.ok ? 'OK' : '실패'));
-        });
-        // 배지를 누르면 일반 <-> 위성 전환
-        document.getElementById('map-mode').onclick = () => {
-          if (!naverMap) return;
-          const cur = naverMap.getMapTypeId();
-          naverMap.setMapTypeId(cur === naver.maps.MapTypeId.NORMAL
-            ? naver.maps.MapTypeId.HYBRID : naver.maps.MapTypeId.NORMAL);
-        };
-        // 컨테이너 크기가 0 인 채로 생성되면 네이버가 그 크기를 기억한다.
-        // 크기가 잡힐 때까지 기다렸다가 resize 를 알리고 다시 맞춘다.
-        stage = '크기 확정';
-        await ensureMapSized();
-        stage = '영역 맞춤';
-        if (state && state.map) fitToMap();
-        requestRender();
-      } catch (e) {
-        fallbackToPhoto(`[${stage}] ${e.name}: ${e.message}`);
-      }
-    }
-
-    // 지도 컨테이너가 실제 크기를 가질 때까지 기다렸다가 네이버에 알린다.
-    async function ensureMapSized(tries = 20) {
-      const el = document.getElementById('navermap');
-      for (let i = 0; i < tries; i++) {
-        if (el.clientWidth > 0 && el.clientHeight > 0) break;
-        await new Promise(r => setTimeout(r, 50));
-      }
-      if (naverMap) naver.maps.Event.trigger(naverMap, 'resize');
-    }
-
-    // 배경을 오프라인 사진으로 되돌린다. 시연 중 화면이 백지가 되는 것보다 낫다.
-    function fallbackToPhoto(why) {
-      naverMap = null;
-      aff.ok = false;
-      document.body.classList.remove('navermap-on');
-      setMapBadge('지도: 오프라인 사진', false);
-      // 화면에도 남긴다. 콘솔을 안 열어도 원인을 볼 수 있어야 한다.
       const el = document.getElementById('map-mode');
-      if (el) el.title = why;
-      setText('hint', '지도 폴백: ' + why);
-      document.querySelectorAll('.view-ctl').forEach(x => { x.style.display = ''; });
-      console.warn(why + ' — 사진 배경으로 폴백');
-      requestRender();
+      if (el) {
+        el.title = b.state === 'ready'
+          ? `네이버 Static Map — ${b.file || ''} ${b.m_per_px ? b.m_per_px.toFixed(2) + ' m/px' : ''}`
+          : (b.detail || '배경 지도 상태 확인 중');
+      }
+      if (b.state === 'nokey') {
+        setText('hint', '네이버 배경 키 없음 — .env 에 NAVER_MAP_STATIC_KEY_ID / '
+          + 'NAVER_MAP_STATIC_KEY 를 넣고 서버를 다시 켜세요 (콘솔에서 Static Map 권한 추가 필요)');
+      } else if (b.state === 'error') {
+        setText('hint', '지도 배경 오류: ' + b.detail);
+      } else {
+        setText('hint', '시점은 실물 지도 영역에 고정 — 배경은 서버가 구워 둔 네이버 지도입니다');
+      }
     }
-
-    // 네이버는 인증 실패를 스크립트 로드 "뒤에" 비동기로 알린다. try/catch 로는
-    // 못 잡고, 안 잡으면 지도 자리가 조용히 흰 화면이 된다. 이 훅이 유일한 신호다.
-    // (키가 틀렸거나, 콘솔에 이 도메인이 등록 안 됐을 때 불린다.)
-    window.navermap_authFailure = function () {
-      fallbackToPhoto('네이버 지도 인증 실패 — 키 또는 등록 도메인(http://localhost:8000)을 확인하세요');
-    };
 
     applyTheme();
     resize();
@@ -2621,7 +2401,7 @@
     pollStatus();
     pollMission();
     initAutoTrack();      // 서버가 이미 무장돼 있으면 화면을 거기에 맞춘다
-    initNaverMap();       // 실패하면 조용히 오프라인 사진 배경으로 폴백
+    initBasemap();        // 배경을 못 받으면 예비 사진(mapomap.jpg)으로 폴백
   </script>
 
   <!-- 열화상 확대 보기 -->

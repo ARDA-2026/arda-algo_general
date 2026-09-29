@@ -19,12 +19,13 @@ from shapely.ops import unary_union
 from shapely import contains_xy
 import osmnx as ox
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import uvicorn
 
 import drone_api
+import basemap
 
 log("=== Han River Real-time Drift Simulation (FastAPI) ===")
 
@@ -34,11 +35,14 @@ log("=== Han River Real-time Drift Simulation (FastAPI) ===")
 API_KEY  = os.getenv("API_KEY", "")
 OBS_CODE = "1018683"
 
-# 네이버 지도 Client ID. 브라우저에 노출되는 값이라 비밀은 아니지만,
-# 콘솔에 등록한 도메인 밖에서는 거부되므로 사실상 도메인 등록이 인증이다.
-# 저장소에 박지 않고 .env 로 뺀 이유는 팀원마다 다른 키를 쓸 수 있어서다.
-# 비어 있으면 프론트는 오프라인 배경(static/mapomap.jpg)으로 폴백한다.
-NAVER_MAP_CLIENT_ID = os.getenv("NAVER_MAP_CLIENT_ID", "")
+# 네이버 지도 배경은 basemap.py 가 Static Map API 로 미리 받아 디스크에 굽는다.
+# 키는 거기서 os.getenv 로 직접 읽는다 (NAVER_MAP_STATIC_KEY_ID / _KEY).
+#
+# 브라우저에서 Web Dynamic Map(JS) 을 직접 띄우던 방식은 걷어냈다. 그 방식은
+# 온라인일 때만 동작하고, 투영도 네이버(UTMK)가 소유해서 오프라인 폴백
+# (등장방형)과 좌표가 달랐다. 시연장에 인터넷이 없을 수 있는데 온/오프라인의
+# 지도·폴리곤·위경도가 갈리면 안 된다. 지금은 양쪽 모두 같은 파일 한 장을
+# 같은 투영으로 깔기 때문에 갈릴 자리가 없다.
 
 def get_velocity():
     url = f"https://api.hrfco.go.kr/{API_KEY}/waterlevel/list/10M/{OBS_CODE}.xml"
@@ -295,6 +299,11 @@ def _rebuild_map(print_w=None, print_h=None, scale=None, east_m=None, south_m=No
     # 이륙 지점은 지도에 붙어 다닌다. 지도가 옮겨가거나 크기가 바뀌면
     # 좌하단 모서리도 따라 움직이므로 여기서 항상 다시 유도한다.
     takeoff_lon, takeoff_lat = takeoff_from_offset(takeoff_off_e, takeoff_off_n)
+
+    # 새 영역의 배경을 미리 받아 둔다. 온라인일 때 구워 놓아야 시연장에서
+    # 인터넷이 없어도 같은 그림이 그대로 나온다. 캐시에 이미 있으면
+    # 네트워크를 건드리지 않고 즉시 돌아온다.
+    basemap.warm(map_lon_min, map_lat_min, map_lon_max, map_lat_max)
 
 
 _rebuild_map()
@@ -712,8 +721,25 @@ async def index():
 
 @app.get("/config")
 async def get_config():
-    """프론트가 부팅 때 필요한 설정. 지금은 네이버 지도 키뿐이다."""
-    return {"naver_map_client_id": NAVER_MAP_CLIENT_ID}
+    """프론트가 부팅 때 필요한 설정."""
+    return {"basemap": basemap.status()}
+
+
+@app.get("/map/background")
+def get_map_background(refresh: bool = False, v: str = ""):
+    """지도 사각형 bbox 에 정확히 맞춘 배경 이미지.
+
+    async 가 아닌 이유: 캐시가 없으면 네이버에서 받아오느라 막힌다.
+    동기 함수로 두면 FastAPI 가 스레드풀에서 돌려서 시뮬/웹소켓이 안 멈춘다.
+
+    v 는 프론트가 붙이는 캐시 무효화용 값이다. 영역이 바뀌면 값이 달라져서
+    브라우저가 옛 배경을 재사용하지 않는다.
+    """
+    p = basemap.ensure(map_lon_min, map_lat_min, map_lon_max, map_lat_max,
+                       force=refresh)
+    if p is None:
+        raise HTTPException(503, basemap.status().get("detail") or "배경 지도 없음")
+    return FileResponse(p, media_type="image/png")
 
 
 @app.get("/river-geojson")
