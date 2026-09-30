@@ -56,11 +56,6 @@ def _call(method, path, body=None, timeout=60):
 def show_status(st):
     _pr(f"  모드      : {'DRY-RUN (기체 없음)' if st['dry_run'] else '실기체'}")
     _pr(f"  연결      : {st['connected']}")
-    if st.get("link_state"):
-        _pr(f"  통신 상태 : {st['link_state']} (연속 실패 {st.get('link_failures', 0)}회)")
-    if st.get("network_failsafe"):
-        _pr("  통신 두절 : 추가 명령 중지, 자동착륙 대기 (실제 착륙 확인 필요)")
-        _pr(f"  재연결    : {st.get('reconnect_in_sec', 0)}초 후 가능")
     _pr(f"  단계      : {st['phase']}")
     _pr(f"  배터리    : {st['battery']}%" if st["battery"] is not None else "  배터리    : -")
     _pr(f"  진행      : leg {st['leg_done']}/{st['leg_total']}  (실행중={st['running']})")
@@ -70,7 +65,6 @@ def show_status(st):
         "aborted":    "사용자 중단 (land 요청)",
         "error":      "실패 (예외 발생)",
         "incomplete": "미완 (레그 일부 미실행)",
-        "link_lost":  "통신 두절 (자동착륙 대기, 실제 착륙 확인 필요)",
     }
     if st.get("result"):
         _pr(f"  종료 사유 : {st['result']} - {label.get(st['result'], '')}")
