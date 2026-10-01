@@ -139,7 +139,7 @@ source venv/bin/activate
 python -m pip install --upgrade pip
 
 # 5. 패키지 설치
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 ### Windows (PowerShell)
@@ -159,7 +159,7 @@ py -3.10 -m venv venv
 python -m pip install --upgrade pip
 
 # 5. 패키지 설치
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 ---
